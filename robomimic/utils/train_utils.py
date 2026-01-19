@@ -27,6 +27,54 @@ from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
 
+class SubtaskSequenceDataset(SequenceDataset):
+    def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
+
+        self.subtask_id = subtask_id
+        self.overlapping = overlapping
+        super().__init__(hdf5_path=hdf5_path, **kwargs)
+
+    def load_demo_info(self, filter_by_attribute=None, demos=None, demo_limit=None):
+        super().load_demo_info(filter_by_attribute=filter_by_attribute, demos=demos, demo_limit=demo_limit)
+
+        if self.subtask_id is None:
+            return
+
+        print(f"Filtering dataset for subtask: {self.subtask_id}")
+        self._demo_id_to_full_length = dict()
+        self._index_to_demo_id = dict()
+        self._demo_id_to_start_indices = dict()
+        self._demo_id_to_demo_length = dict()
+        self._demo_id_to_subtask_start = dict()
+        new_total_num_sequences = 0
+        
+        with h5py.File(self.hdf5_path, "r") as f:
+            for ep in self.demos:
+
+                sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
+                if sub_path not in f:
+                    continue
+                
+                task_start, task_end = f[sub_path][()]
+                sub_demo_length = task_end - task_start + self.overlapping
+                self._demo_id_to_full_length[ep] = self.hdf5_file["data/{}".format(ep)].attrs["num_samples"]
+                self._demo_id_to_start_indices[ep] = new_total_num_sequences
+                self._demo_id_to_demo_length[ep] = sub_demo_length
+                self._demo_id_to_subtask_start[ep] = task_start
+
+                num_sequences = sub_demo_length
+
+                if not self.pad_frame_stack:
+                    num_sequences -= (self.n_frame_stack - 1)
+                if not self.pad_seq_length:
+                    num_sequences -= (self.seq_length - 1)
+
+                num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences    
+                for i in range(num_sequences):
+                    self._index_to_demo_id[new_total_num_sequences] = ep
+                    new_total_num_sequences += 1
+        self.total_num_sequences = new_total_num_sequences 
+        print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
 
 def get_exp_dir(config, auto_remove_exp_dir=False, resume=False):
     """
@@ -185,6 +233,8 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
         hdf5_use_swmr=config.train.hdf5_use_swmr,
         hdf5_normalize_obs=config.train.hdf5_normalize_obs,
         filter_by_attribute=filter_by_attribute,
+        subtask_id=config.meta.hp_values[3],
+        overlapping=config.meta.hp_values[4]
     )
 
     ds_kwargs["hdf5_path"] = [ds_cfg["path"] for ds_cfg in config.train.data]
@@ -195,7 +245,7 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
     meta_ds_kwargs = dict()
 
     dataset = get_dataset(
-        ds_class=SequenceDataset,
+        ds_class=SubtaskSequenceDataset,
         ds_kwargs=ds_kwargs,
         ds_weights=ds_weights,
         ds_langs=ds_langs,
