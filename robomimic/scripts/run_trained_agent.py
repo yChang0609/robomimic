@@ -65,6 +65,7 @@ import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.log_utils as LogUtils
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
@@ -227,7 +228,8 @@ def run_trained_agent(args):
         total_samples = 0
 
     rollout_stats = []
-    for i in range(rollout_num_episodes):
+    
+    for i in LogUtils.custom_tqdm(range(rollout_num_episodes)):
         stats, traj = rollout(
             policy=policy, 
             env=env, 
@@ -273,7 +275,7 @@ def run_trained_agent(args):
         data_grp.attrs["env_args"] = json.dumps(env.serialize(), indent=4) # environment info
         data_writer.close()
         print("Wrote dataset trajectories to {}".format(args.dataset_path))
-
+    env.env.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
