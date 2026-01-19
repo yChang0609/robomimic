@@ -121,3 +121,9 @@ venv.bak/
 
 # private macros
 macros_private.py
+
+configs/*
+results/*
+_tool/*
+run.sh
+eval.sh
