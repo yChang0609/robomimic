@@ -109,9 +109,14 @@ def failed_case_rollout():
     pass
 
 def inference(args):
+
+    # Inferences from failed cases or new environments
+    assert (args.env is not None) or (args.failed_hdf5 is not None), "Need give failed case or env"
+
     if args.output_to_txt_path is not None:
         # log stdout and stderr to a text file
-        logger = PrintLogger(os.path.join(args.output_to_txt_path, 'failed_test_log.txt'))
+        log_file_name = 'test_log.txt' if args.env else 'failed_test_log.txt'
+        logger = PrintLogger(os.path.join(args.output_to_txt_path, log_file_name))
         sys.stdout = logger
         sys.stderr = logger
 
@@ -139,9 +144,8 @@ def inference(args):
         video_writer = imageio.get_writer(args.video_path, fps=20) 
 
     rollout_stats = []
-
-    # Inferences from failed cases or new environments
-    assert (args.env is not None) or (args.failed_hdf5 is not None), "Need give failed case or env"
+    
+    # Env testing
     if args.env:
         # create environment from saved checkpoint
         env, _ = FileUtils.env_from_checkpoint(
@@ -169,7 +173,9 @@ def inference(args):
         print("Average Rollout Stats")
         print(json.dumps(avg_rollout_stats, indent=4))
         env.env.env.close()
-    # else:
+    else:
+        assert args.failed_hdf5 is not None, "If not selcet env plase give the failed hdf5 file."
+        
 
     if write_video:
         video_writer.close()

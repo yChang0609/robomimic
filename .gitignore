@@ -127,3 +127,4 @@ results/*
 _tool/*
 run.sh
 eval.sh
+.vscode/*

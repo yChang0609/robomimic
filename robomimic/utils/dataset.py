@@ -168,15 +168,15 @@ class SequenceDataset(torch.utils.data.Dataset):
                 load_next_obs=self.load_next_obs
             )
 
-            if self.hdf5_cache_mode == "all":
-                # cache getitem calls for even more speedup. We don't do this for
-                # "low-dim" since image observations require calls to getitem anyways.
-                print("SequenceDataset: caching get_item calls...")
-                self.getitem_cache = [self.get_item(i) for i in LogUtils.custom_tqdm(range(len(self)))]
-
-                # don't need the previous cache anymore
-                del self.hdf5_cache
-                self.hdf5_cache = None
+            # if self.hdf5_cache_mode == "all":
+            #     # cache getitem calls for even more speedup. We don't do this for
+            #     # "low-dim" since image observations require calls to getitem anyways.
+            #     print("SequenceDataset: caching get_item calls...")
+            #     self.getitem_cache = [self.get_item(i) for i in LogUtils.custom_tqdm(range(len(self)))]
+   
+            #     # don't need the previous cache anymore
+            #     del self.hdf5_cache
+            #     self.hdf5_cache = None
         else:
             self.hdf5_cache = None
 
@@ -440,11 +440,11 @@ class SequenceDataset(torch.utils.data.Dataset):
         """
         Fetch dataset sequence @index (inferred through internal index map), using the getitem_cache if available.
         """
-        if self.hdf5_cache_mode == "all":
-            output = self.getitem_cache[index]
-        else:
-            output = self.get_item(index)
-
+        # if self.hdf5_cache_mode == "all":
+        #     output = self.getitem_cache[index]
+        # else:
+        #     output = self.get_item(index)
+        output = self.get_item(index)
         return output
 
     def get_item(self, index):

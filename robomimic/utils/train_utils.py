@@ -26,7 +26,138 @@ from robomimic.utils.dataset import SequenceDataset, MetaDataset
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
+import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.python_utils as PyUtils
 
+# class SubtaskSequenceDataset(SequenceDataset):
+#     def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
+
+#         self.subtask_id = subtask_id
+#         self.overlapping = overlapping
+#         super().__init__(hdf5_path=hdf5_path, **kwargs)
+
+    # def load_demo_info(self, filter_by_attribute=None, demos=None, demo_limit=None):
+    #     super().load_demo_info(filter_by_attribute=filter_by_attribute, demos=demos, demo_limit=demo_limit)
+
+    #     if self.subtask_id is None:
+    #         return
+
+    #     print(f"Filtering dataset for subtask: {self.subtask_id}")
+    #     self._demo_id_to_full_length = dict()
+    #     self._index_to_demo_id = dict()
+    #     self._demo_id_to_start_indices = dict()
+    #     self._demo_id_to_demo_length = dict()
+    #     self._demo_id_to_subtask_start = dict()
+    #     new_total_num_sequences = 0
+        
+    #     with h5py.File(self.hdf5_path, "r") as f:
+    #         for ep in self.demos:
+
+    #             sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
+    #             if sub_path not in f:
+    #                 continue
+                
+    #             task_start, task_end = f[sub_path][()]
+    #             sub_demo_length = task_end - task_start + self.overlapping
+    #             self._demo_id_to_full_length[ep] = self.hdf5_file["data/{}".format(ep)].attrs["num_samples"]
+    #             self._demo_id_to_start_indices[ep] = new_total_num_sequences
+    #             self._demo_id_to_demo_length[ep] = sub_demo_length
+    #             self._demo_id_to_subtask_start[ep] = task_start
+
+    #             num_sequences = sub_demo_length
+
+    #             if not self.pad_frame_stack:
+    #                 num_sequences -= (self.n_frame_stack - 1)
+    #             if not self.pad_seq_length:
+    #                 num_sequences -= (self.seq_length - 1)
+
+    #             num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences    
+    #             for i in range(num_sequences):
+    #                 self._index_to_demo_id[new_total_num_sequences] = ep
+    #                 new_total_num_sequences += 1
+    #     self.total_num_sequences = new_total_num_sequences 
+    #     print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
+
+    # def get_item(self, index):
+    #     demo_id = self._index_to_demo_id[index]
+    #     demo_start_index = self._demo_id_to_start_indices[demo_id]
+    #     subtask_len = self._demo_id_to_demo_length[demo_id]
+
+    #     physical_start = self._demo_id_to_subtask_start[demo_id]
+
+    #     demo_index_offset = 0 if self.pad_frame_stack else (self.n_frame_stack - 1)
+    #     relative_index = index - demo_start_index + demo_index_offset
+
+    #     physical_index_in_demo = physical_start + relative_index
+
+    #     demo_length_offset = 0 if self.pad_seq_length else (self.seq_length - 1)
+    #     relative_end_index = subtask_len - demo_length_offset
+    #     physical_end_index = physical_start + relative_end_index
+
+    #     original_sub_len = self._demo_id_to_demo_length[demo_id]
+    #     self._demo_id_to_demo_length[demo_id] = self._demo_id_to_full_length[demo_id]
+        
+    #     try:
+    #         meta = self.get_dataset_sequence_from_demo(
+    #             demo_id,
+    #             index_in_demo=physical_index_in_demo,
+    #             keys=self.dataset_keys,
+    #             num_frames_to_stack=self.n_frame_stack - 1,
+    #             seq_length=self.seq_length
+    #         )
+    #         goal_index = None
+    #         if self.goal_mode == "last":
+    #             goal_index = physical_end_index - 1
+
+        
+    #         meta["obs"] = self.get_obs_sequence_from_demo(
+    #                 demo_id,
+    #                 index_in_demo=physical_index_in_demo,
+    #                 keys=self.obs_keys,
+    #                 num_frames_to_stack=self.n_frame_stack - 1,
+    #                 seq_length=self.seq_length,
+    #                 prefix="obs"
+    #             ) 
+            
+    #         if self.load_next_obs:
+    #             meta["next_obs"] = self.get_obs_sequence_from_demo(
+    #                 demo_id,
+    #                 index_in_demo=physical_index_in_demo,
+    #                 keys=self.obs_keys,
+    #                 num_frames_to_stack=self.n_frame_stack - 1,
+    #                 seq_length=self.seq_length,
+    #                 prefix="next_obs"
+    #             )
+    #         if goal_index is not None:
+    #             goal = self.get_obs_sequence_from_demo(
+    #                 demo_id,
+    #                 index_in_demo=goal_index,
+    #                 keys=self.obs_keys,
+    #                 num_frames_to_stack=0,
+    #                 seq_length=1,
+    #                 prefix="next_obs",
+    #             )
+    #             meta["goal_obs"] = {k: goal[k][0] for k in goal}
+
+    #     finally:
+    #         self._demo_id_to_demo_length[demo_id] = original_sub_len
+
+    #     ac_dict = OrderedDict()
+    #     for k in self.action_keys:
+    #         ac = meta[k]
+    #         if len(ac.shape) == 1:
+    #             ac = ac.reshape(-1, 1)
+    #         ac_dict[k] = ac
+
+    #     # action_normalization_stats = self.get_action_normalization_stats()
+    #     # ac_dict = ObsUtils.normalize_dict(ac_dict, normalization_stats=action_normalization_stats)
+    #     meta["actions"] = PyUtils.action_dict_to_vector(ac_dict)
+    #     meta["index"] = index
+
+    #     if self._lang_emb is not None:
+    #         T = meta["actions"].shape[0]
+    #         meta["obs"][LangUtils.LANG_EMB_OBS_KEY] = np.tile(self._lang_emb, (T, 1))
+    #     return meta
 class SubtaskSequenceDataset(SequenceDataset):
     def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
 
@@ -41,40 +172,87 @@ class SubtaskSequenceDataset(SequenceDataset):
             return
 
         print(f"Filtering dataset for subtask: {self.subtask_id}")
-        self._demo_id_to_full_length = dict()
         self._index_to_demo_id = dict()
         self._demo_id_to_start_indices = dict()
         self._demo_id_to_demo_length = dict()
         self._demo_id_to_subtask_start = dict()
+
         new_total_num_sequences = 0
-        
         with h5py.File(self.hdf5_path, "r") as f:
             for ep in self.demos:
-
                 sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
                 if sub_path not in f:
                     continue
                 
                 task_start, task_end = f[sub_path][()]
-                sub_demo_length = task_end - task_start + self.overlapping
-                self._demo_id_to_full_length[ep] = self.hdf5_file["data/{}".format(ep)].attrs["num_samples"]
+                sub_demo_length = (task_end - task_start) + self.overlapping
+                full_len = f[f"data/{ep}"].attrs["num_samples"]
+                sub_demo_length = min(sub_demo_length, full_len - task_start)
+
                 self._demo_id_to_start_indices[ep] = new_total_num_sequences
                 self._demo_id_to_demo_length[ep] = sub_demo_length
                 self._demo_id_to_subtask_start[ep] = task_start
 
                 num_sequences = sub_demo_length
-
                 if not self.pad_frame_stack:
                     num_sequences -= (self.n_frame_stack - 1)
                 if not self.pad_seq_length:
                     num_sequences -= (self.seq_length - 1)
 
-                num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences    
+                num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences
                 for i in range(num_sequences):
                     self._index_to_demo_id[new_total_num_sequences] = ep
                     new_total_num_sequences += 1
-        self.total_num_sequences = new_total_num_sequences 
+
+        self.total_num_sequences = new_total_num_sequences
         print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
+
+    def get_dataset_for_ep(self, ep, key):
+        if self.subtask_id is None or self.subtask_id < 0:
+            return super().get_dataset_for_ep(ep, key)
+        
+        start = self._demo_id_to_subtask_start[ep]
+        length = self._demo_id_to_demo_length[ep]
+        return super().get_dataset_for_ep(ep, key)[start:start+length]
+
+def test_dataset_factory(dataset, config):
+    # Retrieve the first sample from the dataset
+    sample = dataset[0]
+    
+    # Locate the subtask_id within the hyperparameters
+    idx = config.meta.hp_keys.index("subtask_id")
+    sub_task_id = config.meta.hp_values[idx]
+
+    print("\n--- Dataset Sample Validation ---")
+    print(f"Total sequences in dataset: {len(dataset)}")
+    print(f"Keys available in sample: {list(sample.keys())}")
+    print(f"Action sequence shape: {sample['actions'].shape}")
+    
+    import h5py
+    import numpy as np
+    
+    with h5py.File(config.train.data[0]["path"], "r") as f:
+        # Retrieve the physical start frame index from HDF5 attributes/metadata
+        expected_start = f[f"data/demo_0/subtask_intervals/task_{sub_task_id}"][0]
+        
+        # Fetch the raw action directly from the HDF5 file at the annotated start index
+        expected_action = f["data/demo_0/actions"][expected_start]
+        
+        # Note: You are comparing against sample['actions'][1] 
+        # This usually accounts for temporal offsets or frame stacking logic
+        actual_action = sample["actions"][1]
+        
+        print(f"\nPhysical Start Point Verification (Task {sub_task_id}):")
+        print(f"  HDF5 Annotated Start Index: {expected_start}")
+        print(f"  HDF5 Raw Action (Ground Truth): {expected_action}")
+        print(f"  Dataset Sampled Action (at index 1): {actual_action}")
+        
+        # Compare the two vectors with a small tolerance
+        if np.allclose(actual_action, expected_action, atol=1e-5):
+            print("\nCongratulations! The physical offset logic is perfectly aligned.")
+        else:
+            print("\nWarning: Value mismatch detected. Please check your 'index_in_demo' calculation.")
+            print("Hint: Check if Action Normalization is enabled, as it will change the raw values.")
 
 def get_exp_dir(config, auto_remove_exp_dir=False, resume=False):
     """
@@ -233,9 +411,21 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
         hdf5_use_swmr=config.train.hdf5_use_swmr,
         hdf5_normalize_obs=config.train.hdf5_normalize_obs,
         filter_by_attribute=filter_by_attribute,
-        subtask_id=config.meta.hp_values[3],
-        overlapping=config.meta.hp_values[4]
     )
+
+    ds_class = None
+    if "subtask_id" in config.meta.hp_keys:
+        idx = config.meta.hp_keys.index("subtask_id")
+        ds_kwargs["subtask_id"] = config.meta.hp_values[idx]
+
+        if "overlapping" in config.meta.hp_keys:
+            ds_kwargs["overlapping"] = config.meta.hp_values[config.meta.hp_keys.index("overlapping")]
+        else:
+            ds_kwargs["overlapping"] = 0
+
+        ds_class = SubtaskSequenceDataset
+    else:
+        ds_class = SequenceDataset
 
     ds_kwargs["hdf5_path"] = [ds_cfg["path"] for ds_cfg in config.train.data]
     ds_kwargs["filter_by_attribute"] = [ds_cfg.get("filter_key", filter_by_attribute) for ds_cfg in config.train.data]
@@ -245,7 +435,7 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
     meta_ds_kwargs = dict()
 
     dataset = get_dataset(
-        ds_class=SubtaskSequenceDataset,
+        ds_class=ds_class,
         ds_kwargs=ds_kwargs,
         ds_weights=ds_weights,
         ds_langs=ds_langs,
@@ -255,6 +445,7 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
     )
 
     return dataset
+
 
 
 def get_dataset(
