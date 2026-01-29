@@ -22,198 +22,10 @@ import robomimic.utils.log_utils as LogUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.lang_utils as LangUtils
 
-from robomimic.utils.dataset import SequenceDataset, MetaDataset
+from robomimic.utils.dataset import SubtaskSequenceDataset, SequenceDataset, MetaDataset
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
-import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.python_utils as PyUtils
-
-# class SubtaskSequenceDataset(SequenceDataset):
-#     def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
-
-#         self.subtask_id = subtask_id
-#         self.overlapping = overlapping
-#         super().__init__(hdf5_path=hdf5_path, **kwargs)
-
-    # def load_demo_info(self, filter_by_attribute=None, demos=None, demo_limit=None):
-    #     super().load_demo_info(filter_by_attribute=filter_by_attribute, demos=demos, demo_limit=demo_limit)
-
-    #     if self.subtask_id is None:
-    #         return
-
-    #     print(f"Filtering dataset for subtask: {self.subtask_id}")
-    #     self._demo_id_to_full_length = dict()
-    #     self._index_to_demo_id = dict()
-    #     self._demo_id_to_start_indices = dict()
-    #     self._demo_id_to_demo_length = dict()
-    #     self._demo_id_to_subtask_start = dict()
-    #     new_total_num_sequences = 0
-        
-    #     with h5py.File(self.hdf5_path, "r") as f:
-    #         for ep in self.demos:
-
-    #             sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
-    #             if sub_path not in f:
-    #                 continue
-                
-    #             task_start, task_end = f[sub_path][()]
-    #             sub_demo_length = task_end - task_start + self.overlapping
-    #             self._demo_id_to_full_length[ep] = self.hdf5_file["data/{}".format(ep)].attrs["num_samples"]
-    #             self._demo_id_to_start_indices[ep] = new_total_num_sequences
-    #             self._demo_id_to_demo_length[ep] = sub_demo_length
-    #             self._demo_id_to_subtask_start[ep] = task_start
-
-    #             num_sequences = sub_demo_length
-
-    #             if not self.pad_frame_stack:
-    #                 num_sequences -= (self.n_frame_stack - 1)
-    #             if not self.pad_seq_length:
-    #                 num_sequences -= (self.seq_length - 1)
-
-    #             num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences    
-    #             for i in range(num_sequences):
-    #                 self._index_to_demo_id[new_total_num_sequences] = ep
-    #                 new_total_num_sequences += 1
-    #     self.total_num_sequences = new_total_num_sequences 
-    #     print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
-
-    # def get_item(self, index):
-    #     demo_id = self._index_to_demo_id[index]
-    #     demo_start_index = self._demo_id_to_start_indices[demo_id]
-    #     subtask_len = self._demo_id_to_demo_length[demo_id]
-
-    #     physical_start = self._demo_id_to_subtask_start[demo_id]
-
-    #     demo_index_offset = 0 if self.pad_frame_stack else (self.n_frame_stack - 1)
-    #     relative_index = index - demo_start_index + demo_index_offset
-
-    #     physical_index_in_demo = physical_start + relative_index
-
-    #     demo_length_offset = 0 if self.pad_seq_length else (self.seq_length - 1)
-    #     relative_end_index = subtask_len - demo_length_offset
-    #     physical_end_index = physical_start + relative_end_index
-
-    #     original_sub_len = self._demo_id_to_demo_length[demo_id]
-    #     self._demo_id_to_demo_length[demo_id] = self._demo_id_to_full_length[demo_id]
-        
-    #     try:
-    #         meta = self.get_dataset_sequence_from_demo(
-    #             demo_id,
-    #             index_in_demo=physical_index_in_demo,
-    #             keys=self.dataset_keys,
-    #             num_frames_to_stack=self.n_frame_stack - 1,
-    #             seq_length=self.seq_length
-    #         )
-    #         goal_index = None
-    #         if self.goal_mode == "last":
-    #             goal_index = physical_end_index - 1
-
-        
-    #         meta["obs"] = self.get_obs_sequence_from_demo(
-    #                 demo_id,
-    #                 index_in_demo=physical_index_in_demo,
-    #                 keys=self.obs_keys,
-    #                 num_frames_to_stack=self.n_frame_stack - 1,
-    #                 seq_length=self.seq_length,
-    #                 prefix="obs"
-    #             ) 
-            
-    #         if self.load_next_obs:
-    #             meta["next_obs"] = self.get_obs_sequence_from_demo(
-    #                 demo_id,
-    #                 index_in_demo=physical_index_in_demo,
-    #                 keys=self.obs_keys,
-    #                 num_frames_to_stack=self.n_frame_stack - 1,
-    #                 seq_length=self.seq_length,
-    #                 prefix="next_obs"
-    #             )
-    #         if goal_index is not None:
-    #             goal = self.get_obs_sequence_from_demo(
-    #                 demo_id,
-    #                 index_in_demo=goal_index,
-    #                 keys=self.obs_keys,
-    #                 num_frames_to_stack=0,
-    #                 seq_length=1,
-    #                 prefix="next_obs",
-    #             )
-    #             meta["goal_obs"] = {k: goal[k][0] for k in goal}
-
-    #     finally:
-    #         self._demo_id_to_demo_length[demo_id] = original_sub_len
-
-    #     ac_dict = OrderedDict()
-    #     for k in self.action_keys:
-    #         ac = meta[k]
-    #         if len(ac.shape) == 1:
-    #             ac = ac.reshape(-1, 1)
-    #         ac_dict[k] = ac
-
-    #     # action_normalization_stats = self.get_action_normalization_stats()
-    #     # ac_dict = ObsUtils.normalize_dict(ac_dict, normalization_stats=action_normalization_stats)
-    #     meta["actions"] = PyUtils.action_dict_to_vector(ac_dict)
-    #     meta["index"] = index
-
-    #     if self._lang_emb is not None:
-    #         T = meta["actions"].shape[0]
-    #         meta["obs"][LangUtils.LANG_EMB_OBS_KEY] = np.tile(self._lang_emb, (T, 1))
-    #     return meta
-class SubtaskSequenceDataset(SequenceDataset):
-    def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
-
-        self.subtask_id = subtask_id
-        self.overlapping = overlapping
-        super().__init__(hdf5_path=hdf5_path, **kwargs)
-
-    def load_demo_info(self, filter_by_attribute=None, demos=None, demo_limit=None):
-        super().load_demo_info(filter_by_attribute=filter_by_attribute, demos=demos, demo_limit=demo_limit)
-
-        if self.subtask_id is None:
-            return
-
-        print(f"Filtering dataset for subtask: {self.subtask_id}")
-        self._index_to_demo_id = dict()
-        self._demo_id_to_start_indices = dict()
-        self._demo_id_to_demo_length = dict()
-        self._demo_id_to_subtask_start = dict()
-
-        new_total_num_sequences = 0
-        with h5py.File(self.hdf5_path, "r") as f:
-            for ep in self.demos:
-                sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
-                if sub_path not in f:
-                    continue
-                
-                task_start, task_end = f[sub_path][()]
-                sub_demo_length = (task_end - task_start) + self.overlapping
-                full_len = f[f"data/{ep}"].attrs["num_samples"]
-                sub_demo_length = min(sub_demo_length, full_len - task_start)
-
-                self._demo_id_to_start_indices[ep] = new_total_num_sequences
-                self._demo_id_to_demo_length[ep] = sub_demo_length
-                self._demo_id_to_subtask_start[ep] = task_start
-
-                num_sequences = sub_demo_length
-                if not self.pad_frame_stack:
-                    num_sequences -= (self.n_frame_stack - 1)
-                if not self.pad_seq_length:
-                    num_sequences -= (self.seq_length - 1)
-
-                num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences
-                for i in range(num_sequences):
-                    self._index_to_demo_id[new_total_num_sequences] = ep
-                    new_total_num_sequences += 1
-
-        self.total_num_sequences = new_total_num_sequences
-        print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
-
-    def get_dataset_for_ep(self, ep, key):
-        if self.subtask_id is None or self.subtask_id < 0:
-            return super().get_dataset_for_ep(ep, key)
-        
-        start = self._demo_id_to_subtask_start[ep]
-        length = self._demo_id_to_demo_length[ep]
-        return super().get_dataset_for_ep(ep, key)[start:start+length]
 
 def test_dataset_factory(dataset, config):
     # Retrieve the first sample from the dataset
@@ -826,7 +638,10 @@ def should_save_from_rollout_logs(
     )
 
 
-def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=None, obs_normalization_stats=None, action_normalization_stats=None):
+def save_model(
+        model, config, env_meta, shape_meta, ckpt_path, 
+        variable_state=None, obs_normalization_stats=None, action_normalization_stats=None,
+        saver=None, is_temp=False):
     """
     Save model to a torch pth file.
 
@@ -854,8 +669,10 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=No
             with a "mean" and "std" of shape (1, ...) where ... is the default
             shape for the action.
     """
+    
     env_meta = deepcopy(env_meta)
     shape_meta = deepcopy(shape_meta)
+    
     params = dict(
         model=model.serialize(),
         config=config.dump(),
@@ -871,7 +688,14 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=No
     if action_normalization_stats is not None:
         action_normalization_stats = deepcopy(action_normalization_stats)
         params["action_normalization_stats"] = TensorUtils.to_list(action_normalization_stats)
-    torch.save(params, ckpt_path)
+    if saver is None:
+        torch.save(params, ckpt_path)
+    else:
+        if is_temp: 
+            saver.submit_temp(params, ckpt_path)
+        else:
+            saver.submit_regular(params, ckpt_path)
+
     print("save checkpoint to {}".format(ckpt_path))
 
 

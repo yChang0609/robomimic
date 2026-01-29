@@ -676,6 +676,64 @@ class SequenceDataset(torch.utils.data.Dataset):
         return None
 
 
+class SubtaskSequenceDataset(SequenceDataset):
+    def __init__(self, hdf5_path, subtask_id=-1, overlapping=0, **kwargs):
+
+        self.subtask_id = subtask_id
+        self.overlapping = overlapping
+        super().__init__(hdf5_path=hdf5_path, **kwargs)
+
+    def load_demo_info(self, filter_by_attribute=None, demos=None, demo_limit=None):
+        super().load_demo_info(filter_by_attribute=filter_by_attribute, demos=demos, demo_limit=demo_limit)
+
+        if self.subtask_id is None:
+            return
+
+        print(f"Filtering dataset for subtask: {self.subtask_id}")
+        self._index_to_demo_id = dict()
+        self._demo_id_to_start_indices = dict()
+        self._demo_id_to_demo_length = dict()
+        self._demo_id_to_subtask_start = dict()
+
+        new_total_num_sequences = 0
+        with h5py.File(self.hdf5_path, "r") as f:
+            for ep in self.demos:
+                sub_path = f"data/{ep}/subtask_intervals/task_{self.subtask_id}"
+                if sub_path not in f:
+                    continue
+                
+                task_start, task_end = f[sub_path][()]
+                sub_demo_length = (task_end - task_start) + self.overlapping
+                full_len = f[f"data/{ep}"].attrs["num_samples"]
+                sub_demo_length = min(sub_demo_length, full_len - task_start)
+
+                self._demo_id_to_start_indices[ep] = new_total_num_sequences
+                self._demo_id_to_demo_length[ep] = sub_demo_length
+                self._demo_id_to_subtask_start[ep] = task_start
+
+                num_sequences = sub_demo_length
+                if not self.pad_frame_stack:
+                    num_sequences -= (self.n_frame_stack - 1)
+                if not self.pad_seq_length:
+                    num_sequences -= (self.seq_length - 1)
+
+                num_sequences = max(num_sequences, 1) if self.pad_seq_length else num_sequences
+                for i in range(num_sequences):
+                    self._index_to_demo_id[new_total_num_sequences] = ep
+                    new_total_num_sequences += 1
+
+        self.total_num_sequences = new_total_num_sequences
+        print(f"Subtask {self.subtask_id} re-calculated: {self.total_num_sequences} sequences.")
+
+    def get_dataset_for_ep(self, ep, key):
+        if self.subtask_id is None or self.subtask_id < 0:
+            return super().get_dataset_for_ep(ep, key)
+        
+        start = self._demo_id_to_subtask_start[ep]
+        length = self._demo_id_to_demo_length[ep]
+        return super().get_dataset_for_ep(ep, key)[start:start+length]
+
+
 class CustomWeightedRandomSampler(torch.utils.data.WeightedRandomSampler):
     def __init__(self, *args, **kwargs):
         """
