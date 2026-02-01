@@ -41,12 +41,12 @@ def algo_config_to_class(algo_config):
         algo_kwargs (dict): dictionary of additional kwargs to pass to algorithm
     """
 
-    if algo_config.unet.enabled:
-        return DiffusionPolicyUNet, {}
-    elif algo_config.transformer.enabled:
-        raise NotImplementedError()
-    else:
-        raise RuntimeError()
+    return DiffusionPolicyUNet, {}
+    # if algo_config.unet.enabled:
+    # elif algo_config.transformer.enabled:
+    #     raise NotImplementedError()
+    # else:
+    #     raise RuntimeError()
 
 
 class DiffusionPolicyUNet(PolicyAlgo):
