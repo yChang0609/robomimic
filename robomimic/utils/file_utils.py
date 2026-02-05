@@ -85,6 +85,12 @@ def get_demos_for_filter_key(hdf5_path, filter_key):
     f.close()
     return demo_keys
 
+def get_env_num_substask_from_dataset(dataset_path):
+    dataset_path = os.path.expanduser(dataset_path)
+    f = h5py.File(dataset_path, "r")
+    num_sutask = f["data"].attrs["num_sutask"]
+    f.close()
+    return num_sutask
 
 def get_env_metadata_from_dataset(dataset_path, set_env_specific_obs_processors=True):
     """
@@ -402,7 +408,14 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     ObsUtils.initialize_obs_utils_with_config(config)
 
     # shape meta from model dict to get info needed to create model
-    shape_meta = ckpt_dict["shape_metadata"]
+    # shape_meta = ckpt_dict["shape_metadata"]
+    shape_meta = ckpt_dict.get("shape_metadata", {})
+    if isinstance(shape_meta, list):
+        obs_key_shapes = shape_meta[0]["all_shapes"]
+        ac_dim = shape_meta[0]["ac_dim"]
+    else:
+        obs_key_shapes = shape_meta.get("all_shapes", {})
+        ac_dim = shape_meta.get("ac_dim", {})
 
     # maybe restore observation normalization stats
     obs_normalization_stats = ckpt_dict.get("obs_normalization_stats", None)
@@ -427,8 +440,8 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     model = algo_factory(
         algo_name,
         config,
-        obs_key_shapes=shape_meta["all_shapes"],
-        ac_dim=shape_meta["ac_dim"],
+        obs_key_shapes=obs_key_shapes,
+        ac_dim=ac_dim,
         device=device,
     )
     model.deserialize(ckpt_dict["model"])
@@ -469,8 +482,20 @@ def env_from_checkpoint(ckpt_path=None, ckpt_dict=None, env_name=None, render=Fa
     ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path, ckpt_dict=ckpt_dict)
 
     # metadata from model dict to get info needed to create environment
+    # env_meta = ckpt_dict["env_metadata"]
+    # shape_meta = ckpt_dict["shape_metadata"]
     env_meta = ckpt_dict["env_metadata"]
     shape_meta = ckpt_dict["shape_metadata"]
+    
+    if isinstance(env_meta, list):
+        env_meta, target_shape = next(
+            ((m, s) for m, s in zip(env_meta, shape_meta) if m["env_name"] == env_name),
+            (env_meta[0], shape_meta[0])
+        )
+    else:
+        target_shape = shape_meta
+    use_image_obs = target_shape.get("use_images", False)
+    use_depth_obs = target_shape.get("use_depths", False)    
 
     # create env from saved metadata
     env = EnvUtils.create_env_from_metadata(
@@ -478,8 +503,8 @@ def env_from_checkpoint(ckpt_path=None, ckpt_dict=None, env_name=None, render=Fa
         env_name=env_name, 
         render=render, 
         render_offscreen=render_offscreen,
-        use_image_obs=shape_meta.get("use_images", False),
-        use_depth_obs=shape_meta.get("use_depths", False),
+        use_image_obs=use_image_obs,
+        use_depth_obs=use_depth_obs,
     )
     config, _ = config_from_checkpoint(algo_name=ckpt_dict["algo_name"], ckpt_dict=ckpt_dict, verbose=False)
     env = EnvUtils.wrap_env_from_config(env, config=config) # apply environment wrapper, if applicable

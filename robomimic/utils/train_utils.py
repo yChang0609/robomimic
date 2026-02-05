@@ -22,11 +22,49 @@ import robomimic.utils.log_utils as LogUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.lang_utils as LangUtils
 
-from robomimic.utils.dataset import SequenceDataset, MetaDataset
+from robomimic.utils.dataset import SubtaskSequenceDataset, SequenceDataset, MetaDataset
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
 
+def test_dataset_factory(dataset, config):
+    # Retrieve the first sample from the dataset
+    sample = dataset[0]
+    
+    # Locate the subtask_id within the hyperparameters
+    idx = config.meta.hp_keys.index("subtask_id")
+    sub_task_id = config.meta.hp_values[idx]
+
+    print("\n--- Dataset Sample Validation ---")
+    print(f"Total sequences in dataset: {len(dataset)}")
+    print(f"Keys available in sample: {list(sample.keys())}")
+    print(f"Action sequence shape: {sample['actions'].shape}")
+    
+    import h5py
+    import numpy as np
+    
+    with h5py.File(config.train.data[0]["path"], "r") as f:
+        # Retrieve the physical start frame index from HDF5 attributes/metadata
+        expected_start = f[f"data/demo_0/subtask_intervals/task_{sub_task_id}"][0]
+        
+        # Fetch the raw action directly from the HDF5 file at the annotated start index
+        expected_action = f["data/demo_0/actions"][expected_start]
+        
+        # Note: You are comparing against sample['actions'][1] 
+        # This usually accounts for temporal offsets or frame stacking logic
+        actual_action = sample["actions"][1]
+        
+        print(f"\nPhysical Start Point Verification (Task {sub_task_id}):")
+        print(f"  HDF5 Annotated Start Index: {expected_start}")
+        print(f"  HDF5 Raw Action (Ground Truth): {expected_action}")
+        print(f"  Dataset Sampled Action (at index 1): {actual_action}")
+        
+        # Compare the two vectors with a small tolerance
+        if np.allclose(actual_action, expected_action, atol=1e-5):
+            print("\nCongratulations! The physical offset logic is perfectly aligned.")
+        else:
+            print("\nWarning: Value mismatch detected. Please check your 'index_in_demo' calculation.")
+            print("Hint: Check if Action Normalization is enabled, as it will change the raw values.")
 
 def get_exp_dir(config, auto_remove_exp_dir=False, resume=False):
     """
@@ -187,6 +225,20 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
         filter_by_attribute=filter_by_attribute,
     )
 
+    ds_class = None
+    if "subtask_id" in config.meta.hp_keys:
+        idx = config.meta.hp_keys.index("subtask_id")
+        ds_kwargs["subtask_id"] = config.meta.hp_values[idx]
+
+        if "overlapping" in config.meta.hp_keys:
+            ds_kwargs["overlapping"] = config.meta.hp_values[config.meta.hp_keys.index("overlapping")]
+        else:
+            ds_kwargs["overlapping"] = 0
+
+        ds_class = SubtaskSequenceDataset
+    else:
+        ds_class = SequenceDataset
+
     ds_kwargs["hdf5_path"] = [ds_cfg["path"] for ds_cfg in config.train.data]
     ds_kwargs["filter_by_attribute"] = [ds_cfg.get("filter_key", filter_by_attribute) for ds_cfg in config.train.data]
     ds_kwargs["demo_limit"] = [ds_cfg.get("demo_limit", None) for ds_cfg in config.train.data]
@@ -195,7 +247,7 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
     meta_ds_kwargs = dict()
 
     dataset = get_dataset(
-        ds_class=SequenceDataset,
+        ds_class=ds_class,
         ds_kwargs=ds_kwargs,
         ds_weights=ds_weights,
         ds_langs=ds_langs,
@@ -205,6 +257,7 @@ def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=Non
     )
 
     return dataset
+
 
 
 def get_dataset(
@@ -585,7 +638,10 @@ def should_save_from_rollout_logs(
     )
 
 
-def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=None, obs_normalization_stats=None, action_normalization_stats=None):
+def save_model(
+        model, config, env_meta, shape_meta, ckpt_path, 
+        variable_state=None, obs_normalization_stats=None, action_normalization_stats=None,
+        saver=None, is_temp=False):
     """
     Save model to a torch pth file.
 
@@ -613,8 +669,10 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=No
             with a "mean" and "std" of shape (1, ...) where ... is the default
             shape for the action.
     """
+    
     env_meta = deepcopy(env_meta)
     shape_meta = deepcopy(shape_meta)
+    
     params = dict(
         model=model.serialize(),
         config=config.dump(),
@@ -630,7 +688,14 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, variable_state=No
     if action_normalization_stats is not None:
         action_normalization_stats = deepcopy(action_normalization_stats)
         params["action_normalization_stats"] = TensorUtils.to_list(action_normalization_stats)
-    torch.save(params, ckpt_path)
+    if saver is None:
+        torch.save(params, ckpt_path)
+    else:
+        if is_temp: 
+            saver.submit_temp(params, ckpt_path)
+        else:
+            saver.submit_regular(params, ckpt_path)
+
     print("save checkpoint to {}".format(ckpt_path))
 
 

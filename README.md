@@ -103,3 +103,20 @@ Please cite [this paper](https://arxiv.org/abs/2108.03298) if you use this frame
   year={2021}
 }
 ```
+
+
+run test_failed_demos
+```
+python test_failed_demos.py \
+    --agent /path/to/diffusion_model.pth \
+    --failed_hdf5 /path/to/demo_failed.hdf5 \
+    --n_cases 20 \
+    --video_path ./failed_test_results.mp4 \
+    --camera_names agentview robot0_eye_in_hand
+```
+
+python test_failed_demos.py \
+    --agent  \                            
+    --failed_hdf5 /media/cgv/1tb_disk/AIRobot/demo_datasets/1000_square/demo_src_square_task_D2/demo_failed.hdf5 \
+    --render  \
+    --camera_names agentview robot0_eye_in_hand

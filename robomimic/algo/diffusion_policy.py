@@ -41,12 +41,12 @@ def algo_config_to_class(algo_config):
         algo_kwargs (dict): dictionary of additional kwargs to pass to algorithm
     """
 
-    if algo_config.unet.enabled:
-        return DiffusionPolicyUNet, {}
-    elif algo_config.transformer.enabled:
-        raise NotImplementedError()
-    else:
-        raise RuntimeError()
+    return DiffusionPolicyUNet, {}
+    # if algo_config.unet.enabled:
+    # elif algo_config.transformer.enabled:
+    #     raise NotImplementedError()
+    # else:
+    #     raise RuntimeError()
 
 
 class DiffusionPolicyUNet(PolicyAlgo):
@@ -69,11 +69,15 @@ class DiffusionPolicyUNet(PolicyAlgo):
         obs_encoder = replace_bn_with_gn(obs_encoder)
         
         obs_dim = obs_encoder.output_shape()[0]
-
+        
         # create network object
+        unet_config = self.algo_config["unet"]
+        # TODO if disable need process issue
+        unet_config.pop("enabled", None)
         noise_pred_net = DPNets.ConditionalUnet1D(
             input_dim=self.ac_dim,
-            global_cond_dim=obs_dim*self.algo_config.horizon.observation_horizon
+            global_cond_dim=obs_dim*self.algo_config.horizon.observation_horizon,
+            **unet_config
         )
 
         # the final arch has 2 parts

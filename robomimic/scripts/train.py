@@ -37,12 +37,14 @@ import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.time_utils as TimeUtils
+from robomimic.utils.save_utils import SaveManager
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 
 
-def train(config, device, resume=False):
+def train(config, device, resume=False, auto_remove_exp_dir=False):
     """
     Train a model using the algorithm.
     """
@@ -56,7 +58,7 @@ def train(config, device, resume=False):
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
-    log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(config, resume=resume)
+    log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(config, resume=resume, auto_remove_exp_dir=auto_remove_exp_dir)
 
     # path for latest model and backup (to support @resume functionality)
     latest_model_path = os.path.join(time_dir, "last.pth")
@@ -222,6 +224,8 @@ def train(config, device, resume=False):
                 for k in config.algo["value_planner"][sub_algo].optim_params:
                     config.algo["value_planner"][sub_algo].optim_params[k]["num_train_batches"] = len(trainset) if train_num_steps is None else train_num_steps
                     config.algo["value_planner"][sub_algo].optim_params[k]["num_epochs"] = config.train.num_epochs
+    # Model saver
+    model_saver = SaveManager()
 
     # setup for a new training run
     data_logger = DataLogger(
@@ -294,6 +298,7 @@ def train(config, device, resume=False):
         print("resuming training from epoch {}".format(start_epoch))
         print("*" * 50)
 
+    training_timer = TimeUtils.TrainingTimer()
     for epoch in range(start_epoch, config.train.num_epochs + 1):
         step_log = TrainUtils.run_epoch(
             model=model,
@@ -433,10 +438,12 @@ def train(config, device, resume=False):
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
                 action_normalization_stats=action_normalization_stats,
+                saver=model_saver,
+                is_temp=False
             )
-
         # always save latest model for resume functionality
         print("\nsaving latest model at {}...\n".format(latest_model_path))
+
         TrainUtils.save_model(
             model=model,
             config=config,
@@ -446,11 +453,14 @@ def train(config, device, resume=False):
             ckpt_path=latest_model_path,
             obs_normalization_stats=obs_normalization_stats,
             action_normalization_stats=action_normalization_stats,
+            saver=model_saver,
+            is_temp=True
         )
 
-        # keep a backup model in case last.pth is malformed (e.g. job died last time during saving)
-        shutil.copyfile(latest_model_path, latest_model_backup_path)
-        print("\nsaved backup of latest model at {}\n".format(latest_model_backup_path))
+        # with timer("copyfile"):
+        #     # keep a backup model in case last.pth is malformed (e.g. job died last time during saving)
+        #     shutil.copyfile(latest_model_path, latest_model_backup_path)
+        #     print("\nsaved backup of latest model at {}\n".format(latest_model_backup_path))
 
         # Finally, log memory usage in MB
         process = psutil.Process(os.getpid())
@@ -459,6 +469,8 @@ def train(config, device, resume=False):
         print("\nEpoch {} Memory Usage: {} MB\n".format(epoch, mem_usage))
 
     # terminate logging
+    print(f"Training time({config.train.num_epochs + 1 - start_epoch} epoch): {training_timer.get_elapsed_time()}")
+    model_saver.stop()
     data_logger.close()
 
 
@@ -508,7 +520,7 @@ def main(args):
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device=device, resume=args.resume)
+        train(config, device=device, resume=args.resume, auto_remove_exp_dir=args.auto_remove_exp)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)
@@ -561,6 +573,13 @@ if __name__ == "__main__":
         "--resume",
         action='store_true',
         help="set this flag to resume training from latest checkpoint",
+    )
+
+    # 
+    parser.add_argument(
+        "--auto-remove-exp",
+        action='store_true',
+        help="force delete the experiment folder if it exists"
     )
 
     args = parser.parse_args()
