@@ -94,9 +94,12 @@ def inference(args):
 
     if args.output_to_txt_path is not None:
         # log stdout and stderr to a text file
-        log_name = 'env_test.txt' if args.env else 'failed_case_test.txt'
         os.makedirs(args.output_to_txt_path, exist_ok=True)
-        sys.stdout = sys.stderr = PrintLogger(os.path.join(args.output_to_txt_path, log_name))
+        log_name = 'env_test' if args.env else 'failed_case_test'
+        json_path = os.path.join(args.output_to_txt_path, log_name + ".json")
+        log_path = os.path.join(args.output_to_txt_path, log_name + ".txt")
+        sys.stdout = sys.stderr = PrintLogger(log_path)
+        
 
     write_video = (args.video_path is not None)
     device = TorchUtils.get_torch_device(try_to_use_cuda=True) 
@@ -164,6 +167,9 @@ def inference(args):
 
     print("\n" + "="*30 + "\nFinal Experiment Summary\n" + "="*30)
     print(json.dumps(summary, indent=4))
+
+    with open(json_path, 'w') as json_file:
+        json.dump(summary, json_file, indent=4)
     
     if failed_file: failed_file.close()
     if video_writer: video_writer.close()
