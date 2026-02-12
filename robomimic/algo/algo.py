@@ -274,7 +274,6 @@ class Algo(object):
         """
         assert validate or self.nets.training
         return OrderedDict()
-
     def on_gradient_step(self):
         """
         Called after each gradient step.
@@ -282,8 +281,13 @@ class Algo(object):
         # LR scheduling updates
         if hasattr(self, 'step_lr_schedulers_every_batch'):
             for k, v in self.step_lr_schedulers_every_batch.items():
-                if v and self.lr_schedulers[k] is not None: 
-                    self.lr_schedulers[k].step()
+                if v and self.lr_schedulers[k] is not None:
+                    if isinstance(self.lr_schedulers[k], list):
+                        for lr_scheduler in self.lr_schedulers[k]:
+                            if lr_scheduler is not None:
+                                lr_scheduler.step()
+                    else:
+                        self.lr_schedulers[k].step()
 
     def log_info(self, info):
         """
@@ -300,8 +304,13 @@ class Algo(object):
 
         # record current optimizer learning rates
         for k in self.optimizers:
-            for i, param_group in enumerate(self.optimizers[k].param_groups):
-                log["Optimizer/{}{}_lr".format(k, i)] = param_group["lr"]
+            if isinstance(self.optimizers[k], list):
+                for opt_idx, optimizer in enumerate(self.optimizers[k]):
+                    for i, param_group in enumerate(optimizer.param_groups):
+                        log["Optimizer/{}{}{}_lr".format(k, opt_idx, i)] = param_group["lr"]
+            else:
+                for i, param_group in enumerate(self.optimizers[k].param_groups):
+                    log["Optimizer/{}{}_lr".format(k, i)] = param_group["lr"]
 
         return log
 
@@ -492,7 +501,6 @@ class HierarchicalAlgo(Algo):
         """
         raise NotImplementedError
 
-
 class RolloutPolicy(object):
     """
     Wraps @Algo object to make it easy to run policies in a rollout loop.
@@ -570,6 +578,109 @@ class RolloutPolicy(object):
         if not batched_ob:
             ac = ac[0]
         ac = TensorUtils.to_numpy(ac)
+        if self.action_normalization_stats is not None:
+            action_keys = self.policy.global_config.train.action_keys
+            action_shapes = {k: self.action_normalization_stats[k]["offset"].shape[1:] for k in self.action_normalization_stats}
+            ac_dict = PyUtils.vector_to_action_dict(ac, action_shapes=action_shapes, action_keys=action_keys)
+            ac_dict = ObsUtils.unnormalize_dict(ac_dict, normalization_stats=self.action_normalization_stats)
+            action_config = self.policy.global_config.train.action_config
+            for key, value in ac_dict.items():
+                this_format = action_config[key].get("format", None)
+                if this_format == "rot_6d":
+                    rot_6d = torch.from_numpy(value).unsqueeze(0)
+                    conversion_format = action_config[key].get("convert_at_runtime", "rot_axis_angle")
+                    if conversion_format == "rot_axis_angle":
+                        rot = TorchUtils.rot_6d_to_axis_angle(rot_6d=rot_6d).squeeze().numpy()
+                    elif conversion_format == "rot_euler":
+                        rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ").squeeze().numpy()
+                    else:
+                        raise ValueError
+                    ac_dict[key] = rot
+            ac = PyUtils.action_dict_to_vector(ac_dict, action_keys=action_keys)
+        return ac
+
+
+class ResidualAlgo(PolicyAlgo):
+    """
+    Base class for all algorithms that learn a residual on top of a base policy.
+    """
+    def get_action_with_base(self, obs_dict, goal_dict=None):
+        """
+        Get policy action outputs, including the base action and residual action.
+
+        Args:
+            obs_dict (dict): current observation
+            goal_dict (dict): (optional) goal
+
+        Returns:
+            action (torch.Tensor): total action tensor
+            base_action (torch.Tensor): base action tensor
+            residual_action (torch.Tensor): residual action tensor
+        """
+        raise NotImplementedError
+    
+    def mix_actions(self, base_action, residual_action):
+        """
+        Mix base action and residual action to get the final action.
+
+        Args:
+            base_action (torch.Tensor): base action tensor
+            residual_action (torch.Tensor): residual action tensor
+
+        Returns:
+            action (torch.Tensor): total action tensor
+        """
+        raise NotImplementedError
+
+
+class ResidualRolloutPolicy(RolloutPolicy):
+    def __init__(self, policy:ResidualAlgo, obs_normalization_stats=None, action_normalization_stats=None):
+        """
+        Wraps @ResidualAlgo object to make it easy to run policies in a rollout loop,
+        while keeping track of base and residual actions.
+
+        Args:
+            policy (ResidualAlgo instance): policy to use for rollouts.
+                obs_normalization_stats (dict): optionally pass a dictionary for observation
+                normalization. This should map observation keys to dicts
+                with a "mean" and "std" of shape (1, ...) where ... is the default
+                shape for the observation.
+
+            action_normalization_stats (dict): optionally pass a dictionary for action
+                normalization. This should map action keys to dicts
+                with a "mean" and "std" of shape (1, ...) where ... is the default
+                shape for the action.
+        """
+        super().__init__(policy, obs_normalization_stats, action_normalization_stats)
+        assert isinstance(policy, ResidualAlgo)
+        self.policy = policy
+        self.last_base_action = None
+        self.last_residual_action = None
+
+    def __call__(self, ob, goal=None, batched_ob=False):
+        """
+        Produce action from raw observation dict (and maybe goal dict) from environment.
+        Also stores the base and residual actions internally.
+        """
+        ob_tensor = self._prepare_observation(ob, batched_ob=batched_ob)
+        goal_tensor = None
+        if goal is not None:
+            goal_tensor = self._prepare_observation(goal, batched_ob=batched_ob)
+
+        # Get all action components
+        ac, base_ac, res_ac = self.policy.get_action_with_base(obs_dict=ob_tensor, goal_dict=goal_tensor)
+
+        if not batched_ob:
+            ac = ac[0]
+            base_ac = base_ac[0]
+            res_ac = res_ac[0]
+
+        # Convert to numpy and store components
+        ac = TensorUtils.to_numpy(ac)
+        self.last_base_action = TensorUtils.to_numpy(base_ac)
+        self.last_residual_action = TensorUtils.to_numpy(res_ac)
+
+        # Handle un-normalization for the final action (same as RolloutPolicy)
         if self.action_normalization_stats is not None:
             action_keys = self.policy.global_config.train.action_keys
             action_shapes = {k: self.action_normalization_stats[k]["offset"].shape[1:] for k in self.action_normalization_stats}

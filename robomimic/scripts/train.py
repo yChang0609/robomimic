@@ -40,24 +40,332 @@ import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.time_utils as TimeUtils
 from robomimic.utils.save_utils import SaveManager
 from robomimic.config import config_factory
-from robomimic.algo import algo_factory, RolloutPolicy
+from robomimic.algo import algo_factory, RolloutPolicy, ResidualAlgo, ResidualRolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
+from robomimic.utils.python_utils import deep_update
+from robomimic.utils.replybuffer import ReplayBuffer
 
+def set_seed(config):
+    np.random.seed(config.train.seed)
+    torch.manual_seed(config.train.seed)
 
-def train(config, device, resume=False, auto_remove_exp_dir=False):
+def print_config(config):
+    print("\n============= New Training Run with Config =============")
+    print(config)
+    print("")
+
+def create_envs_from_dataset(config):
+    envs = OrderedDict()
+    env_meta_list = []
+    shape_meta_list = []
+
+    if isinstance(config.train.data, str):
+        with config.values_unlocked():
+            config.train.data = [{"path": config.train.data}]
+            
+    if config.train.data is not None:
+        for dataset_cfg in config.train.data:
+            dataset_path = os.path.expanduser(dataset_cfg["path"])
+            if not os.path.exists(dataset_path):
+                raise Exception("Dataset at provided path {} not found!".format(dataset_path))
+            env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=dataset_path)
+            env_meta["lang"] = dataset_cfg.get("lang", "dummy")
+            deep_update(env_meta, config.experiment.env_meta_update_dict)
+            env_meta_list.append(env_meta)
+
+            shape_meta = FileUtils.get_shape_metadata_from_dataset(
+                dataset_config=dataset_cfg,
+                action_keys=config.train.action_keys,
+                all_obs_keys=config.all_obs_keys
+            )
+            shape_meta_list.append(shape_meta)
+
+    for env_i in range(len(env_meta_list)):
+        dataset_cfg = config.train.data[env_i]
+        env_meta = env_meta_list[env_i]
+        shape_meta = shape_meta_list[env_i]
+        env_names = [env_meta["env_name"]]
+        if (env_i == 0) and (config.experiment.additional_envs is not None):
+            for name in config.experiment.additional_envs:
+                env_names.append(name)
+        for env_name in env_names:
+            env = create_env(config, env_name, env_meta, shape_meta)
+            env_key = os.path.splitext(os.path.basename(dataset_cfg["path"]))[0] if not dataset_cfg.get("key", None) else dataset_cfg["key"]
+            envs[env_key] = env
+            print(env)
+    return envs, env_meta_list, shape_meta_list
+
+# create environment for each env_name
+def create_env(config, env_name, env_meta, shape_meta):
+    env_kwargs = dict(
+        env_meta=env_meta,
+        env_name=env_name,
+        render=False,
+        render_offscreen=config.experiment.render_video,
+        use_image_obs=shape_meta["use_images"] or shape_meta["use_depths"],
+    )
+    env = EnvUtils.create_env_from_metadata(**env_kwargs)
+    # handle environment wrappers
+    env = EnvUtils.wrap_env_from_config(env, config=config)  # apply environment warpper, if applicable
+    return env
+
+def create_model(config, shape_meta, device, resume=None):
+    model = algo_factory(
+        algo_name=config.algo_name,
+        config=config,
+        obs_key_shapes=shape_meta["all_shapes"],
+        ac_dim=shape_meta["ac_dim"],
+        device=device
+    )
+    
+    if resume is not None:
+        # load ckpt dict
+        print("*" * 50)
+        print("resuming from ckpt at {}".format(resume["latest_model_path"]))
+        try:
+            ckpt_dict = FileUtils.load_dict_from_checkpoint(ckpt_path=resume["latest_model_path"])
+        except Exception as e:
+            print("got error: {} when loading from {}".format(e, resume["latest_model_path"]))
+            print("trying backup path {}".format(resume["latest_model_backup_path"]))
+            ckpt_dict = FileUtils.load_dict_from_checkpoint(ckpt_path=resume["latest_model_backup_path"])
+        # load model weights and optimizer state
+        model.deserialize(ckpt_dict["model"], load_optimizers=True)
+        print("*" * 50)
+
+    # if checkpoint is specified, load in model weights;
+    # will not use ckpt_path if resuming training
+    ckpt_path = config.experiment.ckpt_path
+    if (ckpt_path is not None) and (not resume):
+        print("LOADING MODEL WEIGHTS FROM " + ckpt_path)
+        from robomimic.utils.file_utils import maybe_dict_from_checkpoint
+        ckpt_dict = maybe_dict_from_checkpoint(ckpt_path=ckpt_path)
+        model.deserialize(ckpt_dict["model"])
+
+    print("\n============= Model Summary =============")
+    print(model)  # print model summary
+    print("")
+
+    # print all warnings before training begins
+    print("*" * 50)
+    print("Warnings generated by robomimic have been duplicated here (from above) for convenience. Please check them carefully.")
+    flush_warnings()
+    print("*" * 50)
+    print("")
+
+    return model, ckpt_dict["variable_state"] if resume is not None else None
+
+# == Training code == #
+def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
+    # first set seeds
+    set_seed(config)
+    torch.set_num_threads(2)
+    
+    print_config(config)
+    log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(config, resume=resume, auto_remove_exp_dir=auto_remove_exp_dir)
+
+    # path for latest model and backup (to support @resume functionality)
+    latest_model_path = os.path.join(time_dir, "last.pth")
+    latest_model_backup_path = os.path.join(time_dir, "last_bak.pth")
+
+    if config.experiment.logging.terminal_output_to_txt:
+        # log stdout and stderr to a text file
+        logger = PrintLogger(os.path.join(log_dir, 'log.txt'))
+        sys.stdout = logger
+        sys.stderr = logger
+
+    # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
+    ObsUtils.initialize_obs_utils_with_config(config)  
+
+    # extract the metadata and shape metadata across all datasets
+    envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
+
+    # TODO [priority: Low] if give mutli dataset need change this rule
+    env_meta = env_meta_list[0]
+    shape_meta = shape_meta_list[0]
+    print("")
+
+    # load training data
+    trainset, validset = TrainUtils.load_data_for_training(
+        config, obs_keys=shape_meta["all_obs_keys"])
+    train_sampler = trainset.get_dataset_sampler()
+    print("\n============= Training Dataset =============")
+    print(trainset)
+    print("")
+    if validset is not None:
+        print("\n============= Validation Dataset =============")
+        print(validset)
+        print("")
+
+    # maybe retreve statistics for normalizing observations
+    obs_normalization_stats = None
+    if config.train.repalybuffer_normalize_obs:
+        obs_normalization_stats = trainset.get_obs_normalization_stats()
+
+    # maybe retreve statistics for normalizing actions
+    action_normalization_stats = trainset.get_action_normalization_stats()
+
+    # create model saver
+    model_saver = SaveManager()
+
+    # create tensorboard logger
+    data_logger = DataLogger(log_dir, config, log_tb=config.experiment.logging.log_tb)
+
+    # create replaybuffer for RL training
+    replaybuffer = ReplayBuffer(
+        capacity=int(config.train.replaybuffer_capacity), 
+        obs_keys=config.all_obs_keys) 
+    
+    # add info to optim_params
+    train_num_steps = config.experiment.epoch_every_n_steps
+    with config.values_unlocked():
+        if "optim_params" in config.algo:
+            # add info to optim_params of each net
+            for k in config.algo.optim_params:
+                config.algo.optim_params[k]["num_train_batches"] = train_num_steps
+                config.algo.optim_params[k]["num_epochs"] = config.train.num_epochs
+                
+    # create mdoel form config 
+    model, variable_state = create_model(
+        config=config,
+        shape_meta=shape_meta,
+        device=device,
+        resume={
+            "latest_model_path":latest_model_path,
+            "latest_model_backup_path":latest_model_backup_path
+        } if resume else None)
+
+    # save the config as a json file
+    with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
+        json.dump(config, outfile, indent=4)
+
+    # main training loop
+    best_return = {k: -np.inf for k in envs}
+    best_success_rate = {k: -1. for k in envs}
+    last_ckpt_time = time.time()    
+
+    start_epoch = 1 # epoch numbers start at 1
+    if resume:
+        # load variable state needed for train loop
+        start_epoch = variable_state["epoch"] + 1
+        best_return = variable_state["best_return"]
+        best_success_rate = variable_state["best_success_rate"]
+        print("*" * 50)
+        print("resuming training from epoch {}".format(start_epoch))
+        print("*" * 50)
+    
+    training_timer = TimeUtils.TrainingTimer()
+    for epoch in range(start_epoch, config.train.num_epochs + 1): 
+        rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
+        rollout_model = rollout_cls(
+            model,
+            obs_normalization_stats=obs_normalization_stats,
+            action_normalization_stats=action_normalization_stats,
+        )
+
+        rollout_log, _ = TrainUtils.rollout_with_stats(
+            policy=rollout_model, 
+            envs=envs,
+            horizon=config.experiment.rollout.horizon,
+            num_episodes=config.experiment.rollout.n,
+            use_goals=config.use_goals,
+            render=False,
+            video_dir=video_dir if config.experiment.render_video else None,
+            epoch=epoch,
+            replaybuffer=replaybuffer,
+        )
+        if len(replaybuffer) < config.train.batch_size: 
+            continue
+
+        replay_loader = DataLoader(
+            replaybuffer,
+            batch_size=config.train.batch_size,
+            shuffle=True,
+            num_workers=0,
+            drop_last=True,
+        )
+
+        step_log = TrainUtils.run_epoch(
+            model=model,
+            data_loader=replay_loader,
+            epoch=epoch,
+            num_steps=train_num_steps,
+            obs_normalization_stats=obs_normalization_stats,
+        )
+        model.on_epoch_end(epoch)
+
+        print("Train Epoch {}".format(epoch))
+        print(json.dumps(step_log, sort_keys=True, indent=4))
+        for k, v in step_log.items():
+            if k.startswith("Time_"):
+                data_logger.record("Timing_Stats/Train_{}".format(k[5:]), v, epoch)
+            else:
+                data_logger.record("Train/{}".format(k), v, epoch)
+        for env_name, env_rollout_log in rollout_log.items():
+            print("\nEpoch {} Rollouts took {}s (avg) with results:".format(epoch, env_rollout_log["time"]))
+            print("Env: {}".format(env_name))
+            print(json.dumps(env_rollout_log, sort_keys=True, indent=4))
+        
+        should_save_ckpt = False
+        epoch_ckpt_name = f"model_epoch_{epoch}"
+        for env_name in envs:
+            current_return = rollout_log[env_name]["Return"]
+            if current_return > best_return[env_name]:
+                best_return[env_name] = current_return
+                if config.experiment.save.on_best_rollout_return:
+                    should_save_ckpt = True
+                    epoch_ckpt_name += "_best_return"
+
+        if config.experiment.save.every_n_epochs and (epoch % config.experiment.save.every_n_epochs == 0):
+            should_save_ckpt = True
+
+        variable_state = dict(
+            epoch=epoch,
+            best_return=best_return,
+            best_success_rate=best_success_rate,
+            best_valid_loss=None,
+        )
+        if should_save_ckpt:
+            TrainUtils.save_model(
+                model=model,
+                config=config,
+                env_meta=env_meta,
+                shape_meta=shape_meta,
+                variable_state=variable_state,
+                ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
+                obs_normalization_stats=None, 
+                action_normalization_stats=None,
+                saver=model_saver,
+                is_temp=False
+            )
+        process = psutil.Process(os.getpid())
+        mem_usage = int(process.memory_info().rss / 1024 / 1024)
+        data_logger.record("System/RAM Usage (MB)", mem_usage, epoch)
+    print(f"RL Training Complete. Total Time: {training_timer.get_elapsed_time()}")
+
+    for env in envs.values():
+        base_env = env
+        while True:
+            next_env = getattr(base_env, "env", None)
+            if (next_env is None) or (next_env is base_env):
+                break
+            base_env = next_env
+        close_fn = getattr(base_env, "close", None)
+        if callable(close_fn):
+            close_fn()
+            
+    model_saver.stop()
+    data_logger.close()
+
+def il_train(config, device, resume=False, auto_remove_exp_dir=False):
     """
     Train a model using the algorithm.
     """
 
     # first set seeds
-    np.random.seed(config.train.seed)
-    torch.manual_seed(config.train.seed)
-
+    set_seed(config)
     torch.set_num_threads(2)
 
-    print("\n============= New Training Run with Config =============")
-    print(config)
-    print("")
+    print_config(config)
     log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(config, resume=resume, auto_remove_exp_dir=auto_remove_exp_dir)
 
     # path for latest model and backup (to support @resume functionality)
@@ -93,7 +401,6 @@ def train(config, device, resume=False, auto_remove_exp_dir=False):
         env_meta["lang"] = dataset_cfg.get("lang", "dummy")
 
         # update env meta if applicable
-        from robomimic.utils.python_utils import deep_update
         deep_update(env_meta, config.experiment.env_meta_update_dict)
         env_meta_list.append(env_meta)
 
@@ -134,21 +441,9 @@ def train(config, device, resume=False, auto_remove_exp_dir=False):
                 for name in config.experiment.additional_envs:
                     env_names.append(name)
 
-            # create environment for each env_name
-            def create_env(env_name):
-                env_kwargs = dict(
-                    env_meta=env_meta,
-                    env_name=env_name,
-                    render=False,
-                    render_offscreen=config.experiment.render_video,
-                    use_image_obs=shape_meta["use_images"] or shape_meta["use_depths"],
-                )
-                env = EnvUtils.create_env_from_metadata(**env_kwargs)
-                # handle environment wrappers
-                env = EnvUtils.wrap_env_from_config(env, config=config)  # apply environment warpper, if applicable
-                return env
+
             for env_name in env_names:
-                env = create_env(env_name)
+                env = create_env(config, env_name, env_meta, shape_meta)
                 env_key = os.path.splitext(os.path.basename(dataset_cfg["path"]))[0] if not dataset_cfg.get("key", None) else dataset_cfg["key"]
                 envs[env_key] = env
                 print(env)
@@ -516,11 +811,16 @@ def main(args):
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()
+    
+    if "training_mode" not in config.train:
+        with config.values_unlocked():
+            config.train.training_mode = "IL"
 
+    train_func = il_train if config.train.training_mode == "IL" else rl_train        
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device=device, resume=args.resume, auto_remove_exp_dir=args.auto_remove_exp)
+        train_func(config, device=device, resume=args.resume, auto_remove_exp_dir=args.auto_remove_exp)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)

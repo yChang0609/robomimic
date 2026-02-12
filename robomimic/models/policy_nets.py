@@ -393,7 +393,66 @@ class GaussianActorNetwork(ActorNetwork):
             self.ac_dim, self.fixed_std, self.std_activation, self.init_std, self.mean_limits, self.std_limits, self.low_noise_eval)
         return msg
 
+class ResidualGaussianActorNetwork(GaussianActorNetwork):
+    def __init__(self, obs_shapes, ac_dim, mlp_layer_dims, observation_horizon, **kwargs):
+        self.observation_horizon = observation_horizon
+        super(ResidualGaussianActorNetwork, self).__init__(
+            obs_shapes=obs_shapes,
+            ac_dim=ac_dim,
+            mlp_layer_dims=mlp_layer_dims,
+            **kwargs
+        )
+        single_frame_dim = self.nets["encoder"].output_shape()[0]
+        flattened_dim = single_frame_dim * self.observation_horizon
 
+        from robomimic.models.base_nets import MLP
+        # intermediate MLP layers
+        self.nets["mlp"] = MLP(
+            input_dim=flattened_dim,
+            output_dim=mlp_layer_dims[-1],
+            layer_dims=mlp_layer_dims[:-1],
+            activation=nn.ReLU,
+            output_activation=nn.ReLU, 
+        )
+
+    def forward_train(self, obs_dict, goal_dict=None):
+        inputs = {
+            "obs": obs_dict,
+            "goal": goal_dict
+        }
+        for k in self.obs_shapes:
+            if inputs["obs"][k].ndim - 1 == len(self.obs_shapes[k]):
+                inputs["obs"][k] = inputs["obs"][k].unsqueeze(1)
+            assert inputs["obs"][k].ndim - 2 == len(self.obs_shapes[k])
+            
+        obs_features = TensorUtils.time_distributed(
+            inputs, 
+            self.nets["encoder"], 
+            inputs_as_kwargs=True
+        )
+        mlp_out = self.nets["mlp"](obs_features.flatten(start_dim=1))
+        out = self.nets["decoder"](mlp_out)
+
+        mean = out["mean"]
+        scale = out["scale"] if not self.fixed_std else torch.ones_like(mean) * self.init_std
+
+        mean = torch.clamp(mean, min=self.mean_limits[0], max=self.mean_limits[1])
+        if not self.use_tanh:
+            mean = torch.tanh(mean)
+
+        if self.low_noise_eval and (not self.training):
+            scale = torch.ones_like(mean) * 1e-4
+        else:
+            scale = self.activations[self.std_activation](scale)
+            scale = torch.clamp(scale, min=self.std_limits[0], max=self.std_limits[1])
+
+        dist = D.Normal(loc=mean, scale=scale)
+        dist = D.Independent(dist, 1)
+
+        if self.use_tanh:
+            dist = TanhWrappedDistribution(base_dist=dist, scale=1.)
+        return dist
+    
 class GMMActorNetwork(ActorNetwork):
     """
     Variant of actor network that learns a multimodal Gaussian mixture distribution
@@ -1568,3 +1627,5 @@ class VAEActor(Module):
             mod = list(obs_dict.keys())[0]
             n = obs_dict[mod].shape[0]
         return self.decode(obs_dict=obs_dict, goal_dict=goal_dict, z=z, n=n)["action"]
+
+

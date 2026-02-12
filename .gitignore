@@ -128,3 +128,4 @@ _tool/*
 run.sh
 eval.sh
 .vscode/*
+tests/tmp_model_dir/*

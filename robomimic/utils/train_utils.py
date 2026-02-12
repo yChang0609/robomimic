@@ -22,10 +22,12 @@ import robomimic.utils.log_utils as LogUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.lang_utils as LangUtils
 
+
 from robomimic.utils.dataset import SubtaskSequenceDataset, SequenceDataset, MetaDataset
+from robomimic.utils.replybuffer import ReplayBuffer, TransitionBuffer
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
-from robomimic.algo import RolloutPolicy
+from robomimic.algo import RolloutPolicy, ResidualRolloutPolicy
 
 def test_dataset_factory(dataset, config):
     # Retrieve the first sample from the dataset
@@ -324,7 +326,7 @@ def batchify_obs(obs_list):
     
     return obs
 
-
+# Run rollout function
 def run_rollout(
         policy, 
         env, 
@@ -334,6 +336,8 @@ def run_rollout(
         video_writer=None,
         video_skip=5,
         terminate_on_success=False,
+        replaybuffer:ReplayBuffer=None,
+        init_state={}
     ):
     """
     Runs a rollout in an environment with the current network parameters.
@@ -359,7 +363,9 @@ def run_rollout(
     Returns:
         results (dict): dictionary containing return, success rate, etc.
     """
-    assert isinstance(policy, RolloutPolicy)
+    assert isinstance(policy, RolloutPolicy) 
+    if replaybuffer is not None and "base_actions" in replaybuffer.keys:
+        assert isinstance(policy, ResidualRolloutPolicy)
     assert isinstance(env, EnvBase) or isinstance(env, EnvWrapper)
 
     policy.start_episode()
@@ -380,6 +386,8 @@ def run_rollout(
 
     video_frames = []
     
+    buffer = TransitionBuffer() if replaybuffer is not None else None
+
     try:
         for step_i in range(horizon):
             # get action from policy
@@ -389,6 +397,16 @@ def run_rollout(
             # play action
             ob_dict, r, done, _ = env.step(ac)
 
+            if replaybuffer is not None:
+                buffer.add_step(
+                    obs=policy_ob, 
+                    next_obs=ob_dict, 
+                    action=ac, 
+                    base_action=policy.last_base_action, 
+                    reward=r, 
+                    done=done
+                )
+                
             # render to screen
             if render:
                 env.render(mode="human")
@@ -420,6 +438,8 @@ def run_rollout(
     except env.rollout_exceptions as e:
         print("WARNING: got rollout exception {}".format(e))
 
+    if replaybuffer is not None:
+        replaybuffer.add(buffer)
 
     if video_writer is not None:
         for frame in video_frames:
@@ -439,7 +459,92 @@ def run_rollout(
 
     return results
 
+# Run rollout function
+def run_rollout_with_replaybuffer(
+        policy: RolloutPolicy, 
+        env, 
+        horizon: int,
+        replaybuffer:ReplayBuffer,
+        use_goals=False,
+        render=False,
+        video_writer=None,
+        video_skip=5,
+        terminate_on_success=False,
+        init_state={}
+    ):
+    assert isinstance(policy, RolloutPolicy)
+    assert isinstance(env, EnvBase) or isinstance(env, EnvWrapper)
 
+    policy.start_episode()
+
+    ob_dict = env.reset()
+    goal_dict = None
+    if use_goals:
+        # retrieve goal from the environment
+        goal_dict = env.get_goal()
+
+    results = {}
+    video_count = 0  # video frame counter
+
+    rews = []
+    success = None # success metrics
+
+    end_step = None
+
+    video_frames = []
+
+    buffer = TransitionBuffer()
+
+    try:
+        for step_i in range(horizon):
+            # get action from policy
+            policy_ob = ob_dict
+            ac = policy(ob=policy_ob, goal=goal_dict)
+
+            # play action
+            ob_dict, r, done, _ = env.step(ac)
+            buffer.add_step(
+                obs=policy_ob, 
+                next_obs=ob_dict, 
+                action=ac, 
+                base_action=None, 
+                reward = r, 
+                done = done
+            )
+            # render to screen
+            if render:
+                env.render(mode="human")
+
+            # compute reward
+            rews.append(r)
+
+            cur_success_metrics = env.is_success()
+
+            if success is None:
+                success = deepcopy(cur_success_metrics)
+            else:
+                for k in success:
+                    success[k] = success[k] | cur_success_metrics[k]
+
+            # visualization
+            if video_writer is not None:
+                if video_count % video_skip == 0:
+                    frame = env.render(mode="rgb_array", height=512, width=512)
+                    video_frames.append(frame)
+
+                video_count += 1
+
+            # break if done
+            if done or (terminate_on_success and success["task"]):
+                end_step = step_i
+                break
+        replaybuffer.add(buffer)
+
+    except env.rollout_exceptions as e:
+        print("WARNING: got rollout exception {}".format(e))
+
+
+# rollout warrper function
 def rollout_with_stats(
         policy,
         envs,
@@ -453,6 +558,8 @@ def rollout_with_stats(
         video_skip=5,
         terminate_on_success=False,
         verbose=False,
+        replaybuffer:ReplayBuffer=None,
+        init_states={}
     ):
     """
     A helper function used in the train loop to conduct evaluation rollouts per environment
@@ -525,6 +632,7 @@ def rollout_with_stats(
             env_name, horizon, use_goals, num_episodes,
         ))
         rollout_logs = []
+        # TODO [priority : mid] if give init_states need reset to
         iterator = range(num_episodes)
         if not verbose:
             iterator = LogUtils.custom_tqdm(iterator, total=num_episodes)
@@ -541,7 +649,10 @@ def rollout_with_stats(
                 video_writer=env_video_writer,
                 video_skip=video_skip,
                 terminate_on_success=terminate_on_success,
+                replaybuffer=replaybuffer,
+                init_state={}
             )
+            
             rollout_info["time"] = time.time() - rollout_timestamp
 
             rollout_logs.append(rollout_info)
@@ -566,7 +677,6 @@ def rollout_with_stats(
         video_writer.close()
 
     return all_rollout_logs, video_paths
-
 
 def should_save_from_rollout_logs(
         all_rollout_logs,
