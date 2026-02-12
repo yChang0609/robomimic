@@ -29,18 +29,24 @@ class ResidualPolicyConfig(BaseConfig):
         
         # Training mode
         self.train.training_mode = "RL"
+        self.train.replaybuffer_capacity = 2e5
+        self.train.repalybuffer_normalize_obs = False
 
         # optimization parameters
-        # self.algo.optim_params.res_policy.optimizer_type = "adamw"
-        # self.algo.optim_params.res_policy.learning_rate.initial = 1e-4      # policy learning rate
-        # self.algo.optim_params.res_policy.learning_rate.decay_factor = 0.1  # factor to decay LR by (if epoch schedule non-empty)
-        # self.algo.optim_params.res_policy.learning_rate.step_every_batch = True
-        # self.algo.optim_params.res_policy.learning_rate.scheduler_type = "cosine"
-        # self.algo.optim_params.res_policy.learning_rate.num_cycles = 0.5 # number of cosine cycles (used by "cosine" scheduler)
-        # self.algo.optim_params.res_policy.learning_rate.warmup_steps = 500 # number of warmup steps (used by "cosine" scheduler)
-        # self.algo.optim_params.res_policy.learning_rate.epoch_schedule = [] # epochs where LR decay occurs (used by "linear" and "multistep" schedulers)
-        # self.algo.optim_params.res_policy.learning_rate.do_not_lock_keys()
-        # self.algo.optim_params.res_policy.regularization.L2 = 1e-6          # L2 regularization strength
+        for net_name in ("res_policy", "critic"):
+            net_optim = self.algo.optim_params[net_name]
+            net_lr = net_optim.learning_rate
+
+            net_optim.optimizer_type = "adamw"
+            net_lr.initial = 1e-4      # learning rate
+            net_lr.decay_factor = 0.1  # factor to decay LR by (if epoch schedule non-empty)
+            net_lr.step_every_batch = True
+            net_lr.scheduler_type = "cosine"
+            net_lr.num_cycles = 0.5    # number of cosine cycles (used by "cosine" scheduler)
+            net_lr.warmup_steps = 500  # number of warmup steps (used by "cosine" scheduler)
+            net_lr.epoch_schedule = [] # epochs where LR decay occurs (used by "linear" and "multistep" schedulers)
+            net_lr.do_not_lock_keys()
+            net_optim.regularization.L2 = 1e-6  # L2 regularization strength
 
         # EMA parameters
         self.algo.ema.enabled = True
