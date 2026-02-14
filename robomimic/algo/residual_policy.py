@@ -252,7 +252,47 @@ class ResidualPolicy(ResidualAlgo):
         info["actor/log_prob"] = log_prob.mean().item()
         info["actor/residual_l2"] = (scaled_residual ** 2).mean().item()
         return info
-        
+    
+    def log_info(self, info):
+        """
+        Process info dictionary from @train_on_batch to summarize
+        information to pass to tensorboard for logging.
+
+        Args:
+            info (dict): dictionary of info
+
+        Returns:
+            loss_log (dict): name -> summary statistic
+        """
+        log = super(ResidualPolicy, self).log_info(info)
+        if "critic/loss" in info and "actor/loss" in info:
+            log["Loss"] = info["critic/loss"] + info["actor/loss"]
+        elif "critic/loss" in info:
+            log["Loss"] = info["critic/loss"]
+        elif "actor/loss" in info:
+            log["Loss"] = info["actor/loss"]
+
+        if "critic/loss" in info:
+            log["Critic/Loss"] = info["critic/loss"]
+        if "critic/critic1_loss" in info:
+            log["Critic/Critic1_Loss"] = info["critic/critic1_loss"]
+        if "critic/critic2_loss" in info:
+            log["Critic/Critic2_Loss"] = info["critic/critic2_loss"]
+        if "critic/q1" in info:
+            log["Critic/Q1"] = info["critic/q1"]
+        if "critic/q2" in info:
+            log["Critic/Q2"] = info["critic/q2"]
+        if "critic/target_q" in info:
+            log["Critic/Target_Q"] = info["critic/target_q"]
+
+        if "actor/loss" in info:
+            log["Actor/Loss"] = info["actor/loss"]
+        if "actor/log_prob" in info:
+            log["Actor/Log_Prob"] = info["actor/log_prob"]
+        if "actor/residual_l2" in info:
+            log["Actor/Residual_L2"] = info["actor/residual_l2"]
+        return log
+    
     def reset(self):
         """
         Reset algo state to prepare for environment rollouts.
