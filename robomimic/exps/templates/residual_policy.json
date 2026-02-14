@@ -68,6 +68,7 @@
             }
         },
         "goal_mode": null,
+        "rollout_init_state_sample_size": null,
         "cuda": true,
         "batch_size": 100,
         "num_epochs": 2000,

@@ -18,6 +18,10 @@ class ResidualPolicyConfig(BaseConfig):
         
         # disable next_obs loading from hdf5
         self.train.hdf5_load_next_obs = False
+        
+        # optional: override rollout episode count with sampled failed init-state count
+        # if None, fallback to experiment.rollout.n
+        self.train.rollout_init_state_sample_size = None
     
     def algo_config(self):
         """

@@ -95,6 +95,95 @@ def create_envs_from_dataset(config):
             print(env)
     return envs, env_meta_list, shape_meta_list
 
+def _dataset_cfg_to_env_key(dataset_cfg):
+    return os.path.splitext(os.path.basename(dataset_cfg["path"]))[0] if not dataset_cfg.get("key", None) else dataset_cfg["key"]
+
+
+def _extract_demo_init_state(demo_group):
+    if "states" not in demo_group:
+        return None
+
+    states = demo_group["states"]
+    try:
+        first_state = states[0]
+    except Exception:
+        # Some datasets store states as an HDF5 group of per-field arrays.
+        try:
+            first_state = {k: states[k][0] for k in states.keys()}
+        except Exception:
+            return None
+
+    init_state = {"states": first_state}
+    if "model_file" in demo_group.attrs:
+        init_state["model"] = demo_group.attrs["model_file"]
+    if "ep_meta" in demo_group.attrs:
+        init_state["ep_meta"] = demo_group.attrs["ep_meta"]
+    return init_state
+
+
+def build_rollout_init_states_from_trainset(config, trainset):
+    """
+    Build rollout init-state pools per env key from the train dataset(s).
+    """
+    rollout_init_states = OrderedDict()
+    if config.train.data is None:
+        return rollout_init_states
+
+    datasets = trainset.datasets if hasattr(trainset, "datasets") else [trainset]
+    if len(datasets) != len(config.train.data):
+        print(
+            "WARNING: dataset count mismatch between trainset ({}) and config.train.data ({}). "
+            "Using the first {} entries.".format(
+                len(datasets), len(config.train.data), min(len(datasets), len(config.train.data))
+            )
+        )
+
+    num_entries = min(len(datasets), len(config.train.data))
+    for ds_idx in range(num_entries):
+        dataset_cfg = config.train.data[ds_idx]
+        env_key = _dataset_cfg_to_env_key(dataset_cfg)
+        dataset = datasets[ds_idx]
+        rollout_init_states[env_key] = []
+
+        if (not hasattr(dataset, "demos")) or (not hasattr(dataset, "hdf5_file_opened")):
+            print(
+                "WARNING: dataset for env_key '{}' does not expose demos / hdf5 access. "
+                "Skipping init-state extraction.".format(env_key)
+            )
+            continue
+
+        with dataset.hdf5_file_opened() as hdf5_file:
+            for demo_id in dataset.demos:
+                demo_path = "data/{}".format(demo_id)
+                if demo_path not in hdf5_file:
+                    print("WARNING: missing '{}' in dataset for env_key '{}', skipping.".format(demo_path, env_key))
+                    continue
+
+                init_state = _extract_demo_init_state(hdf5_file[demo_path])
+                if init_state is None:
+                    print(
+                        "WARNING: demo '{}' for env_key '{}' has no valid states[0], skipping.".format(
+                            demo_id, env_key
+                        )
+                    )
+                    continue
+                rollout_init_states[env_key].append(init_state)
+
+        if len(rollout_init_states[env_key]) == 0:
+            print(
+                "WARNING: env_key '{}' has no valid init states. Rollouts will fallback to env.reset().".format(
+                    env_key
+                )
+            )
+        else:
+            print(
+                "Loaded {} rollout init states for env_key '{}'.".format(
+                    len(rollout_init_states[env_key]), env_key
+                )
+            )
+
+    return rollout_init_states
+
 # create environment for each env_name
 def create_env(config, env_name, env_meta, shape_meta):
     env_kwargs = dict(
@@ -196,7 +285,30 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         print(validset)
         print("")
 
+    # preload failed-demo init states once (for fast per-epoch rollout sampling)
+    rollout_init_states = build_rollout_init_states_from_trainset(config=config, trainset=trainset)
+
+    # optional override for rollout episode count when sampling failed init states
+    rollout_init_state_sample_size = config.train.get("rollout_init_state_sample_size", None)
+    if rollout_init_state_sample_size is None:
+        rollout_num_episodes = config.experiment.rollout.n
+    else:
+        rollout_num_episodes = int(rollout_init_state_sample_size)
+        if rollout_num_episodes <= 0:
+            raise ValueError(
+                "config.train.rollout_init_state_sample_size must be > 0, got {}".format(
+                    rollout_init_state_sample_size
+                )
+            )
+        print(
+            "Using train.rollout_init_state_sample_size={} as rollout num_episodes "
+            "(overrides experiment.rollout.n={}).".format(
+                rollout_num_episodes, config.experiment.rollout.n
+            )
+        )
+
     # maybe retreve statistics for normalizing observations
+    # TODO using base policy normal state can't use new dataset normalization_stats
     obs_normalization_stats = None
     if config.train.repalybuffer_normalize_obs:
         obs_normalization_stats = trainset.get_obs_normalization_stats()
@@ -255,23 +367,24 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     
     training_timer = TimeUtils.TrainingTimer()
     for epoch in range(start_epoch, config.train.num_epochs + 1): 
-        rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
+        # rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
+        rollout_cls = RolloutPolicy
         rollout_model = rollout_cls(
-            model,
+            model.base_policy,
             obs_normalization_stats=obs_normalization_stats,
             action_normalization_stats=action_normalization_stats,
         )
-
         rollout_log, _ = TrainUtils.rollout_with_stats(
             policy=rollout_model, 
             envs=envs,
             horizon=config.experiment.rollout.horizon,
-            num_episodes=config.experiment.rollout.n,
+            num_episodes=rollout_num_episodes,
             use_goals=config.use_goals,
             render=False,
             video_dir=video_dir if config.experiment.render_video else None,
             epoch=epoch,
-            replaybuffer=replaybuffer,
+            # replaybuffer=replaybuffer,
+            init_states=rollout_init_states,
         )
         if len(replaybuffer) < config.train.batch_size: 
             continue
@@ -352,7 +465,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         close_fn = getattr(base_env, "close", None)
         if callable(close_fn):
             close_fn()
-            
+
     model_saver.stop()
     data_logger.close()
 
