@@ -308,7 +308,6 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         )
 
     # maybe retreve statistics for normalizing observations
-    # TODO using base policy normal state can't use new dataset normalization_stats
     obs_normalization_stats = None
     if config.train.repalybuffer_normalize_obs:
         obs_normalization_stats = trainset.get_obs_normalization_stats()
@@ -345,6 +344,30 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             "latest_model_path":latest_model_path,
             "latest_model_backup_path":latest_model_backup_path
         } if resume else None)
+    
+    if isinstance(model, ResidualAlgo):
+        base_policy_ckpt_path = getattr(getattr(model.algo_config, "base_policy", None), "ckpt_path", None)
+        if base_policy_ckpt_path is not None:
+            base_policy_ckpt_dict = FileUtils.load_dict_from_checkpoint(ckpt_path=base_policy_ckpt_path)
+
+            if config.train.repalybuffer_normalize_obs:
+                base_obs_normalization_stats = base_policy_ckpt_dict.get("obs_normalization_stats", None)
+                if base_obs_normalization_stats is not None:
+                    for obs_key in base_obs_normalization_stats:
+                        for stat_key in base_obs_normalization_stats[obs_key]:
+                            base_obs_normalization_stats[obs_key][stat_key] = np.array(
+                                base_obs_normalization_stats[obs_key][stat_key]
+                            )
+                    obs_normalization_stats = base_obs_normalization_stats
+
+            base_action_normalization_stats = base_policy_ckpt_dict.get("action_normalization_stats", None)
+            if base_action_normalization_stats is not None:
+                for action_key in base_action_normalization_stats:
+                    for stat_key in base_action_normalization_stats[action_key]:
+                        base_action_normalization_stats[action_key][stat_key] = np.array(
+                            base_action_normalization_stats[action_key][stat_key]
+                        )
+                action_normalization_stats = base_action_normalization_stats
 
     # save the config as a json file
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
@@ -367,10 +390,9 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     
     training_timer = TimeUtils.TrainingTimer()
     for epoch in range(start_epoch, config.train.num_epochs + 1): 
-        # rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
-        rollout_cls = RolloutPolicy
+        rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
         rollout_model = rollout_cls(
-            model.base_policy,
+            model,
             obs_normalization_stats=obs_normalization_stats,
             action_normalization_stats=action_normalization_stats,
         )
@@ -382,8 +404,9 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             use_goals=config.use_goals,
             render=False,
             video_dir=video_dir if config.experiment.render_video else None,
+            terminate_on_success=config.experiment.rollout.terminate_on_success,
             epoch=epoch,
-            # replaybuffer=replaybuffer,
+            replaybuffer=replaybuffer,
             init_states=rollout_init_states,
         )
         if len(replaybuffer) < config.train.batch_size: 

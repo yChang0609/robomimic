@@ -399,16 +399,6 @@ def run_rollout(
             # play action
             ob_dict, r, done, _ = env.step(ac)
 
-            if replaybuffer is not None:
-                buffer.add_step(
-                    obs=policy_ob, 
-                    next_obs=ob_dict, 
-                    action=ac, 
-                    base_action=policy.last_base_action, 
-                    reward=r, 
-                    done=done
-                )
-                
             # render to screen
             if render:
                 env.render(mode="human")
@@ -432,6 +422,16 @@ def run_rollout(
 
                 video_count += 1
 
+            if replaybuffer is not None:
+                buffer.add_step(
+                    obs=policy_ob, 
+                    next_obs=ob_dict, 
+                    action=ac, 
+                    base_action=policy.last_base_action, 
+                    reward=r, 
+                    done=(done or success["task"])
+                )
+                
             # break if done
             if done or (terminate_on_success and success["task"]):
                 end_step = step_i
