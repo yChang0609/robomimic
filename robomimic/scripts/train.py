@@ -49,6 +49,38 @@ def set_seed(config):
     np.random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
 
+def _progressive_residual_action_prob(global_steps, warmup_steps=1500, full_residual_steps=10000):
+    if global_steps <= warmup_steps:
+        return 0.0
+    if global_steps >= full_residual_steps:
+        return 1.0
+    return float(global_steps - warmup_steps) / float(full_residual_steps - warmup_steps)
+
+
+class ProgressiveResidualRolloutPolicy(ResidualRolloutPolicy):
+    """
+    Residual rollout policy with stochastic residual gating.
+    """
+    def __init__(self, policy, obs_normalization_stats=None, action_normalization_stats=None, residual_action_prob=1.0):
+        super().__init__(
+            policy=policy,
+            obs_normalization_stats=obs_normalization_stats,
+            action_normalization_stats=action_normalization_stats,
+        )
+        self.residual_action_prob = float(np.clip(residual_action_prob, 0.0, 1.0))
+
+    def __call__(self, ob, goal=None, batched_ob=False):
+        if self.residual_action_prob >= 1.0:
+            return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
+
+        original_scale = self.policy.residual_scale
+        if np.random.rand() >= self.residual_action_prob:
+            self.policy.residual_scale = 0.0
+        try:
+            return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
+        finally:
+            self.policy.residual_scale = original_scale
+
 def print_config(config):
     print("\n============= New Training Run with Config =============")
     print(config)
@@ -390,12 +422,21 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     
     training_timer = TimeUtils.TrainingTimer()
     for epoch in range(start_epoch, config.train.num_epochs + 1): 
-        rollout_cls = ResidualRolloutPolicy if isinstance(model, ResidualAlgo) else RolloutPolicy
-        rollout_model = rollout_cls(
-            model,
-            obs_normalization_stats=obs_normalization_stats,
-            action_normalization_stats=action_normalization_stats,
-        )
+        if isinstance(model, ResidualAlgo):
+            residual_action_prob = _progressive_residual_action_prob(len(replaybuffer))
+            rollout_model = ProgressiveResidualRolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+                residual_action_prob=residual_action_prob,
+            )
+        else:
+            rollout_model = RolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+            )
+
         rollout_log, _ = TrainUtils.rollout_with_stats(
             policy=rollout_model, 
             envs=envs,
@@ -409,6 +450,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             replaybuffer=replaybuffer,
             init_states=rollout_init_states,
         )
+
         if len(replaybuffer) < config.train.batch_size: 
             continue
 
