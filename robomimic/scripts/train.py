@@ -299,9 +299,27 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
 
     # extract the metadata and shape metadata across all datasets
     envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
-    # TODO Warpper env into dense reward 
-    # - square task
-    # - other task must raise error 
+    env_name = env_meta_list[0]["env_name"]
+    if "square" not in env_name.lower():
+        raise NotImplementedError(
+            "Dense-reward env wrapping is only implemented for square task, got env '{}'".format(env_name)
+        )
+    for env in envs.values():
+        base_env = env.env
+        while True:
+            if hasattr(base_env, "_init_kwargs"):
+                break
+            next_env = getattr(base_env, "env", None)
+            if (next_env is None) or (next_env is base_env):
+                break
+            base_env = next_env
+        if not hasattr(base_env, "_init_kwargs"):
+            raise RuntimeError("Failed to locate base env wrapper with init kwargs for dense reward setup")
+        base_env._init_kwargs["reward_shaping"] = True
+        rs_env = getattr(base_env, "env", None)
+        if (rs_env is None) or (not hasattr(rs_env, "reward_shaping")):
+            raise RuntimeError("Failed to enable dense reward for env '{}'".format(base_env))
+        rs_env.reward_shaping = True
     
     # TODO [priority: Low] if give mutli dataset need change this rule
     env_meta = env_meta_list[0]
