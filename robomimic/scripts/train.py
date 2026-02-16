@@ -299,7 +299,10 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
 
     # extract the metadata and shape metadata across all datasets
     envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
-
+    # TODO Warpper env into dense reward 
+    # - square task
+    # - other task must raise error 
+    
     # TODO [priority: Low] if give mutli dataset need change this rule
     env_meta = env_meta_list[0]
     shape_meta = shape_meta_list[0]
@@ -473,6 +476,11 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
 
         print("Train Epoch {}".format(epoch))
         print(json.dumps(step_log, sort_keys=True, indent=4))
+        # TODO: Log the following metrics to monitor model training performance:
+        # - rollout success rate
+        # - rollout horizon_mean
+        # - replaybuffer length
+        # - progressive residual action prob
         for k, v in step_log.items():
             if k.startswith("Time_"):
                 data_logger.record("Timing_Stats/Train_{}".format(k[5:]), v, epoch)
