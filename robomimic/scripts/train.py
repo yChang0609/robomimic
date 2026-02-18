@@ -494,11 +494,14 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
 
         print("Train Epoch {}".format(epoch))
         print(json.dumps(step_log, sort_keys=True, indent=4))
-        # TODO: Log the following metrics to monitor model training performance:
-        # - rollout success rate
-        # - rollout horizon_mean
-        # - replaybuffer length
-        # - progressive residual action prob
+        rollout_success_rate = np.mean([env_rollout_log["Success_Rate"] for env_rollout_log in rollout_log.values()])
+        rollout_horizon_mean = np.mean([env_rollout_log["Horizon"] for env_rollout_log in rollout_log.values()])
+        data_logger.record("Rollout/Success_Rate", rollout_success_rate, epoch)
+        data_logger.record("Rollout/Horizon_Mean", rollout_horizon_mean, epoch)
+        data_logger.record("ReplayBuffer/Length", len(replaybuffer), epoch)
+        if isinstance(model, ResidualAlgo):
+            data_logger.record("Train/Progressive_Residual_Action_Prob", residual_action_prob, epoch)
+
         for k, v in step_log.items():
             if k.startswith("Time_"):
                 data_logger.record("Timing_Stats/Train_{}".format(k[5:]), v, epoch)
