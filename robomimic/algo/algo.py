@@ -701,3 +701,35 @@ class ResidualRolloutPolicy(RolloutPolicy):
                     ac_dict[key] = rot
             ac = PyUtils.action_dict_to_vector(ac_dict, action_keys=action_keys)
         return ac
+
+def progressive_residual_action_prob(global_steps, warmup_steps=1500, full_residual_steps=10000):
+    if global_steps <= warmup_steps:
+        return 0.0
+    if global_steps >= full_residual_steps:
+        return 1.0
+    return float(global_steps - warmup_steps) / float(full_residual_steps - warmup_steps)
+
+
+class ProgressiveResidualRolloutPolicy(ResidualRolloutPolicy):
+    """
+    Residual rollout policy with stochastic residual gating.
+    """
+    def __init__(self, policy, obs_normalization_stats=None, action_normalization_stats=None, residual_action_prob=1.0):
+        super().__init__(
+            policy=policy,
+            obs_normalization_stats=obs_normalization_stats,
+            action_normalization_stats=action_normalization_stats,
+        )
+        self.residual_action_prob = float(np.clip(residual_action_prob, 0.0, 1.0))
+
+    def __call__(self, ob, goal=None, batched_ob=False):
+        if self.residual_action_prob >= 1.0:
+            return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
+
+        original_scale = self.policy.residual_scale
+        if np.random.rand() >= self.residual_action_prob:
+            self.policy.residual_scale = 0.0
+        try:
+            return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
+        finally:
+            self.policy.residual_scale = original_scale
