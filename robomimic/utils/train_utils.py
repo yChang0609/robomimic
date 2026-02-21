@@ -423,10 +423,18 @@ def run_rollout(
                 video_count += 1
 
             if replaybuffer is not None:
+                # by default, use environment action for replay buffer (not normalized by default)
+                replay_action = ac 
+
+                # if using a residual policy with action normalization stats from the base policy, 
+                # we need to use the normalized action for the replay buffer
+                if policy.last_action_normalized is not None:
+                    replay_action = policy.last_action_normalized
+                
                 buffer.add_step(
                     obs=policy_ob, 
                     next_obs=ob_dict, 
-                    action=ac, 
+                    action=replay_action, 
                     base_action=policy.last_base_action, 
                     reward=r, 
                     done=(done or success["task"])
@@ -447,7 +455,8 @@ def run_rollout(
         for frame in video_frames:
             video_writer.append_data(frame)
 
-    end_step = end_step or step_i
+    if end_step is None:
+        end_step = step_i
     total_reward = np.sum(rews[:end_step + 1])
     
     results["Return"] = total_reward

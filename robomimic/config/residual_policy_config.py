@@ -22,6 +22,10 @@ class ResidualPolicyConfig(BaseConfig):
         # optional: override rollout episode count with sampled failed init-state count
         # if None, fallback to experiment.rollout.n
         self.train.rollout_init_state_sample_size = None
+
+        # by default use action normalization stats from the current training dataset
+        # instead of overriding with base-policy checkpoint stats
+        self.train.use_base_action_normalization_stats = False
     
     def algo_config(self):
         """

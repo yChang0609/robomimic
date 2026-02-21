@@ -656,6 +656,7 @@ class ResidualRolloutPolicy(RolloutPolicy):
         self.policy = policy
         self.last_base_action = None
         self.last_residual_action = None
+        self.last_action_normalized = None
 
     def __call__(self, ob, goal=None, batched_ob=False):
         """
@@ -677,6 +678,7 @@ class ResidualRolloutPolicy(RolloutPolicy):
 
         # Convert to numpy and store components
         ac = TensorUtils.to_numpy(ac)
+        self.last_action_normalized = np.copy(ac)
         self.last_base_action = TensorUtils.to_numpy(base_ac)
         self.last_residual_action = TensorUtils.to_numpy(res_ac)
 

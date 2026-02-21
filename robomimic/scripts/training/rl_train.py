@@ -2,7 +2,6 @@ import json
 import os
 import psutil
 import sys
-import time
 
 import numpy as np
 import torch
@@ -83,7 +82,6 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     # load training data
     trainset, validset = TrainUtils.load_data_for_training(
         config, obs_keys=shape_meta["all_obs_keys"])
-    train_sampler = trainset.get_dataset_sampler()
     print("\n============= Training Dataset =============")
     print(trainset)
     print("")
@@ -167,14 +165,37 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                             )
                     obs_normalization_stats = base_obs_normalization_stats
 
-            base_action_normalization_stats = base_policy_ckpt_dict.get("action_normalization_stats", None)
-            if base_action_normalization_stats is not None:
-                for action_key in base_action_normalization_stats:
-                    for stat_key in base_action_normalization_stats[action_key]:
-                        base_action_normalization_stats[action_key][stat_key] = np.array(
-                            base_action_normalization_stats[action_key][stat_key]
-                        )
-                action_normalization_stats = base_action_normalization_stats
+            if config.train.get("use_base_action_normalization_stats", False):
+                base_action_normalization_stats = base_policy_ckpt_dict.get("action_normalization_stats", None)
+                if base_action_normalization_stats is None:
+                    print(
+                        "\nWARNING: train.use_base_action_normalization_stats is True, but base checkpoint has no action_normalization_stats. "
+                        "Falling back to dataset action stats."
+                    )
+                else:
+                    # convert stats from checkpoint to numpy arrays
+                    for action_key in base_action_normalization_stats:
+                        for stat_key in base_action_normalization_stats[action_key]:
+                            base_action_normalization_stats[action_key][stat_key] = np.array(
+                                base_action_normalization_stats[action_key][stat_key]
+                            )
+
+                    # print out the max difference in offset and scale for each action key 
+                    # between the base policy stats and the dataset stats (if available) 
+                    # before overriding with the base policy stats
+                    if action_normalization_stats is not None:
+                        for action_key in base_action_normalization_stats:
+                            if action_key not in action_normalization_stats:
+                                continue
+                            base_stats = base_action_normalization_stats[action_key]
+                            dataset_stats = action_normalization_stats[action_key]
+                            offset_diff = float(np.max(np.abs(base_stats["offset"] - dataset_stats["offset"])))
+                            scale_diff = float(np.max(np.abs(base_stats["scale"] - dataset_stats["scale"])))
+                            print(
+                                f"Overriding action normalization stats from base policy for key='{action_key}': "
+                                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
+                            )
+                    action_normalization_stats = base_action_normalization_stats
 
     # save the config as a json file
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
@@ -183,7 +204,6 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     # main training loop
     best_return = {k: -np.inf for k in envs}
     best_success_rate = {k: -1. for k in envs}
-    last_ckpt_time = time.time()    
 
     start_epoch = 1 # epoch numbers start at 1
     if resume:
@@ -266,17 +286,22 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             print("Env: {}".format(env_name))
             print(json.dumps(env_rollout_log, sort_keys=True, indent=4))
         
-        should_save_ckpt = False
-        epoch_ckpt_name = f"model_epoch_{epoch}"
-        for env_name in envs:
-            current_return = rollout_log[env_name]["Return"]
-            if current_return > best_return[env_name]:
-                best_return[env_name] = current_return
-                if config.experiment.save.on_best_rollout_return:
-                    should_save_ckpt = True
-                    epoch_ckpt_name += "_best_return"
+        updated_stats = TrainUtils.should_save_from_rollout_logs(
+            all_rollout_logs=rollout_log,
+            best_return=best_return,
+            best_success_rate=best_success_rate,
+            epoch_ckpt_name=f"model_epoch_{epoch}",
+            save_on_best_rollout_return=config.experiment.save.on_best_rollout_return,
+            save_on_best_rollout_success_rate=config.experiment.save.on_best_rollout_success_rate,
+        )
+        best_return = updated_stats["best_return"]
+        best_success_rate = updated_stats["best_success_rate"]
+        epoch_ckpt_name = updated_stats["epoch_ckpt_name"]
 
-        if config.experiment.save.every_n_epochs and (epoch % config.experiment.save.every_n_epochs == 0):
+        should_save_ckpt = False
+        if config.experiment.save.enabled:
+            should_save_ckpt = updated_stats["should_save_ckpt"]
+        if config.experiment.save.enabled and config.experiment.save.every_n_epochs and (epoch % config.experiment.save.every_n_epochs == 0):
             should_save_ckpt = True
 
         variable_state = dict(
@@ -293,11 +318,24 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                 shape_meta=shape_meta,
                 variable_state=variable_state,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
-                obs_normalization_stats=None, 
-                action_normalization_stats=None,
+                obs_normalization_stats=obs_normalization_stats, 
+                action_normalization_stats=action_normalization_stats,
                 saver=model_saver,
                 is_temp=False
             )
+        print("\nsaving latest model at {}...\n".format(latest_model_path))
+        TrainUtils.save_model(
+            model=model,
+            config=config,
+            env_meta=env_meta,
+            shape_meta=shape_meta,
+            variable_state=variable_state,
+            ckpt_path=latest_model_path,
+            obs_normalization_stats=obs_normalization_stats,
+            action_normalization_stats=action_normalization_stats,
+            saver=model_saver,
+            is_temp=True
+        )
         process = psutil.Process(os.getpid())
         mem_usage = int(process.memory_info().rss / 1024 / 1024)
         data_logger.record("System/RAM Usage (MB)", mem_usage, epoch)
