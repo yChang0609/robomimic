@@ -121,21 +121,16 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         config=config, trainset=trainset
     )
 
-    # optional override for rollout episode count when sampling failed init states
-    rollout_init_state_sample_size = config.train.get(
-        "rollout_init_state_sample_size", None
-    )
-    if rollout_init_state_sample_size is None:
-        rollout_num_episodes = config.experiment.rollout.n
-    else:
-        rollout_num_episodes = int(rollout_init_state_sample_size)
-        if rollout_num_episodes <= 0:
-            raise ValueError(
-                f"config.train.rollout_init_state_sample_size must be > 0, got {rollout_init_state_sample_size}"
-            )
-        print(
-            f"Using train.rollout_init_state_sample_size={rollout_init_state_sample_size} as rollout num_episodes "
-            f"(overrides experiment.rollout.n={config.experiment.rollout.n})."
+    eval_rollout_num_episodes = int(config.experiment.rollout.n)
+    if eval_rollout_num_episodes <= 0:
+        raise ValueError(
+            f"config.experiment.rollout.n must be > 0, got {config.experiment.rollout.n}"
+        )
+
+    train_rollout_num_episodes = int(config.train.rollout_init_state_sample_size)
+    if train_rollout_num_episodes <= 0:
+        raise ValueError(
+            f"config.train.rollout_init_state_sample_size must be > 0, got {train_rollout_num_episodes}"
         )
 
     # maybe retreve statistics for normalizing observations
@@ -147,7 +142,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     action_normalization_stats = trainset.get_action_normalization_stats()
 
     # add info to optim_params
-    train_num_steps = (config.experiment.epoch_every_n_steps,)
+    train_num_steps = config.experiment.epoch_every_n_steps
     with config.values_unlocked():
         if "optim_params" in config.algo:
             # add info to optim_params of each net
@@ -284,7 +279,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             policy=rollout_model,
             envs=envs,
             horizon=config.experiment.rollout.horizon,
-            num_episodes=rollout_num_episodes,
+            num_episodes=train_rollout_num_episodes,
             use_goals=config.use_goals,
             render=False,
             video_dir=video_dir if config.experiment.render_video else None,
@@ -364,7 +359,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                     policy=residual_eval_model,
                     envs=envs,
                     horizon=config.experiment.rollout.horizon,
-                    num_episodes=rollout_num_episodes,
+                    num_episodes=eval_rollout_num_episodes,
                     use_goals=config.use_goals,
                     render=False,
                     video_dir=None,

@@ -596,9 +596,7 @@ def rollout_with_stats(
         if len(env_state_pool) > 0:
             sampled_init_states = _sample_init_states_for_rollouts(env_state_pool, env_num_episodes)
             print(
-                "rollout: env_key='{}' sampling {} episodes from {} init states".format(
-                    env_key, env_num_episodes, len(env_state_pool)
-                )
+                f"rollout: env_key='{env_key}' sampling {env_num_episodes} episodes from {len(env_state_pool)} init states"
             )
         else:
             sampled_init_states = [None] * env_num_episodes
@@ -818,7 +816,7 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
 
     step_log_all = []
     timing_stats = dict(Data_Loading=[], Process_Batch=[], Train_Batch=[], Log_Info=[])
-    start_time = time.time()
+    # start_time = time.time()
 
     data_loader_iter = iter(data_loader)
     for _ in LogUtils.custom_tqdm(range(num_steps)):
