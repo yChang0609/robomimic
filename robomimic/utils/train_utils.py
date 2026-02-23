@@ -431,13 +431,15 @@ def run_rollout(
                 if policy.last_action_normalized is not None:
                     replay_action = policy.last_action_normalized
                 
+                # treat rollout timeout as terminal to avoid critic bootstrap on horizon-truncated failures
+                terminal = done or success["task"] or (step_i == (horizon - 1))
                 buffer.add_step(
                     obs=policy_ob, 
                     next_obs=ob_dict, 
                     action=replay_action, 
                     base_action=policy.last_base_action, 
                     reward=r, 
-                    done=(done or success["task"])
+                    done=terminal
                 )
                 
             # break if done

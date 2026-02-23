@@ -30,6 +30,42 @@ from robomimic.scripts.training.utils import (
 )
 
 
+def _log_action_normalization_diffs(
+    base_action_normalization_stats,
+    dataset_action_normalization_stats,
+    use_base_action_stats,
+):
+    """
+    Compare base-policy and dataset action-normalization stats, then print either
+    override logs (use_base_action_stats=True) or warning logs (False).
+    """
+    if dataset_action_normalization_stats is None:
+        return
+
+    for action_key in base_action_normalization_stats:
+        if action_key not in dataset_action_normalization_stats:
+            continue
+        base_stats = base_action_normalization_stats[action_key]
+        dataset_stats = dataset_action_normalization_stats[action_key]
+        offset_diff = float(
+            np.max(np.abs(base_stats["offset"] - dataset_stats["offset"]))
+        )
+        scale_diff = float(
+            np.max(np.abs(base_stats["scale"] - dataset_stats["scale"]))
+        )
+        if use_base_action_stats:
+            print(
+                f"Overriding action normalization stats from base policy for key='{action_key}': "
+                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
+            )
+        else:
+            print(
+                f"WARNING: Keeping dataset action normalization stats for key='{action_key}' "
+                f"(train.use_base_action_normalization_stats=False) despite mismatch: "
+                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
+            )
+
+
 def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     # === set up directories, logging, and seeds ===
     # first set seeds
@@ -71,33 +107,49 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
     env_name = env_meta_list[0]["env_name"]
 
-    # sanity check for env name to make sure it's compatible with dense reward setup in this training script
-    if "square" not in env_name.lower():
-        raise NotImplementedError(
-            "Dense-reward env wrapping is only implemented for square task, got env '{}'".format(
-                env_name
+    force_reward_shaping = config.train.get("force_reward_shaping", None)
+    if force_reward_shaping is None:
+        print(
+            "Reward shaping override disabled (train.force_reward_shaping=None); "
+            "using env / dataset default reward mode."
+        )
+    else:
+        # keep existing square-task constraint for explicit reward-shaping overrides.
+        if "square" not in env_name.lower():
+            raise NotImplementedError(
+                "Reward-shaping override is only implemented for square task, got env '{}'".format(
+                    env_name
+                )
+            )
+
+        force_reward_shaping = bool(force_reward_shaping)
+        print(
+            "Forcing env reward_shaping={} from train.force_reward_shaping".format(
+                force_reward_shaping
             )
         )
-    for env in envs.values():
-        base_env = env.env
-        while True:
-            if hasattr(base_env, "_init_kwargs"):
-                break
-            next_env = getattr(base_env, "env", None)
-            if (next_env is None) or (next_env is base_env):
-                break
-            base_env = next_env
-        if not hasattr(base_env, "_init_kwargs"):
-            raise RuntimeError(
-                "Failed to locate base env wrapper with init kwargs for dense reward setup"
-            )
-        base_env._init_kwargs["reward_shaping"] = True
-        rs_env = getattr(base_env, "env", None)
-        if (rs_env is None) or (not hasattr(rs_env, "reward_shaping")):
-            raise RuntimeError(
-                "Failed to enable dense reward for env '{}'".format(base_env)
-            )
-        rs_env.reward_shaping = True
+        for env in envs.values():
+            base_env = env.env
+            while True:
+                if hasattr(base_env, "_init_kwargs"):
+                    break
+                next_env = getattr(base_env, "env", None)
+                if (next_env is None) or (next_env is base_env):
+                    break
+                base_env = next_env
+            if not hasattr(base_env, "_init_kwargs"):
+                raise RuntimeError(
+                    "Failed to locate base env wrapper with init kwargs for reward-shaping override"
+                )
+            base_env._init_kwargs["reward_shaping"] = force_reward_shaping
+            rs_env = getattr(base_env, "env", None)
+            if (rs_env is None) or (not hasattr(rs_env, "reward_shaping")):
+                raise RuntimeError(
+                    "Failed to set reward_shaping={} for env '{}'".format(
+                        force_reward_shaping, base_env
+                    )
+                )
+            rs_env.reward_shaping = force_reward_shaping
 
     # TODO [priority: Low] if give mutli dataset need change this rule
     env_meta = env_meta_list[0]
@@ -185,52 +237,41 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                             )
                     obs_normalization_stats = base_obs_normalization_stats
 
-            if config.train.get("use_base_action_normalization_stats", False):
-                base_action_normalization_stats = base_policy_ckpt_dict.get(
-                    "action_normalization_stats", None
-                )
-                if base_action_normalization_stats is None:
+            use_base_action_stats = config.train.get(
+                "use_base_action_normalization_stats", False
+            )
+            base_action_normalization_stats = base_policy_ckpt_dict.get(
+                "action_normalization_stats", None
+            )
+            if base_action_normalization_stats is None:
+                if use_base_action_stats:
                     print(
                         "\nWARNING: train.use_base_action_normalization_stats is True, but base checkpoint has no action_normalization_stats. "
                         "Falling back to dataset action stats."
                     )
-                else:
-                    # convert stats from checkpoint to numpy arrays
-                    for action_key in base_action_normalization_stats:
-                        for stat_key in base_action_normalization_stats[action_key]:
-                            base_action_normalization_stats[action_key][stat_key] = (
-                                np.array(
-                                    base_action_normalization_stats[action_key][
-                                        stat_key
-                                    ]
-                                )
-                            )
+            else:
+                # convert stats from checkpoint to numpy arrays
+                for action_key in base_action_normalization_stats:
+                    for stat_key in base_action_normalization_stats[action_key]:
+                        base_action_normalization_stats[action_key][stat_key] = np.array(
+                            base_action_normalization_stats[action_key][stat_key]
+                        )
 
-                    # print out the max difference in offset and scale for each action key
-                    # between the base policy stats and the dataset stats (if available)
-                    # before overriding with the base policy stats
-                    if action_normalization_stats is not None:
-                        for action_key in base_action_normalization_stats:
-                            if action_key not in action_normalization_stats:
-                                continue
-                            base_stats = base_action_normalization_stats[action_key]
-                            dataset_stats = action_normalization_stats[action_key]
-                            offset_diff = float(
-                                np.max(
-                                    np.abs(
-                                        base_stats["offset"] - dataset_stats["offset"]
-                                    )
-                                )
-                            )
-                            scale_diff = float(
-                                np.max(
-                                    np.abs(base_stats["scale"] - dataset_stats["scale"])
-                                )
-                            )
-                            print(
-                                f"Overriding action normalization stats from base policy for key='{action_key}': "
-                                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
-                            )
+                # always compare base stats vs dataset stats when both are available,
+                # even if we keep dataset stats (use_base_action_stats=False).
+                if action_normalization_stats is not None:
+                    _log_action_normalization_diffs(
+                        base_action_normalization_stats=base_action_normalization_stats,
+                        dataset_action_normalization_stats=action_normalization_stats,
+                        use_base_action_stats=use_base_action_stats,
+                    )
+                elif use_base_action_stats:
+                    print(
+                        "\nWARNING: No dataset action normalization stats available; "
+                        "using base policy action normalization stats without a mismatch check."
+                    )
+
+                if use_base_action_stats:
                     action_normalization_stats = base_action_normalization_stats
 
     # save the config as a json file
