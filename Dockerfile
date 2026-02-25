@@ -1,5 +1,5 @@
 # Base image with Python 3.9 and Linux
-FROM nvidia/cuda:11.8.0-base-ubuntu20.04
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -29,29 +29,33 @@ RUN curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_6
     rm /tmp/miniconda.sh && \
     conda clean -afy
 
+# Accept Anaconda Terms of Service for non-interactive Docker builds
+RUN /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
 # Create and activate robomimic conda environment with Python 3.9
 RUN /opt/conda/bin/conda create -n robomimic_venv python=3.9 -y
 
-# Install PyTorch and torchvision with CPU fallback
-RUN /opt/conda/bin/conda run -n robomimic_venv conda install -y pytorch==2.0.0 torchvision==0.15.0 cpuonly -c pytorch || \
-    /opt/conda/bin/conda run -n robomimic_venv pip install torch==2.0.0+cpu torchvision==0.15.0+cpu
+# Install PyTorch and torchvision (fallback to pip on transient conda download failures)
+RUN /opt/conda/bin/conda run -n robomimic_venv conda install -y pytorch==2.4.1 torchvision==0.19.1 cpuonly -c pytorch
 
-# Install robomimic from source
+
+# Install robosuite at a pinned commit
 WORKDIR /opt
-RUN git clone https://github.com/ARISE-Initiative/robomimic.git && \
-    /opt/conda/bin/conda run -n robomimic_venv pip install -e ./robomimic
-
-# Install robosuite
 RUN git clone https://github.com/ARISE-Initiative/robosuite.git && \
     cd robosuite && \
-    /opt/conda/bin/conda run -n robomimic_venv pip install -r requirements.txt
+    git checkout b9d8d3de5e3dfd1724f4a0e6555246c460407daa && \
+    /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir --retries 10 --timeout 120 --prefer-binary --only-binary=mujoco -r requirements.txt && \
+    /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir -e . --no-deps
 
-# Optional: Install robomimic documentation dependencies
-WORKDIR /opt/robomimic
-RUN /opt/conda/bin/conda run -n robomimic_venv pip install -r requirements-docs.txt
-
-# Set the working directory
+# Install local robomimic package from this build context
 WORKDIR /workspace
+COPY . /workspace
+RUN /opt/conda/bin/conda run -n robomimic_venv pip install -e .
+
+# # Optional: Install robomimic documentation dependencies
+# WORKDIR /opt/robomimic
+# RUN /opt/conda/bin/conda run -n robomimic_venv pip install -r requirements-docs.txt
 
 # Activate Conda environment and start bash when container starts
 CMD ["/bin/bash", "-c", "source /opt/conda/etc/profile.d/conda.sh && conda activate robomimic_venv && bash"]
