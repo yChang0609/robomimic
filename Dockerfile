@@ -36,8 +36,8 @@ RUN /opt/conda/bin/conda tos accept --override-channels --channel https://repo.a
 # Create and activate robomimic conda environment with Python 3.9
 RUN /opt/conda/bin/conda create -n robomimic_venv python=3.9 -y
 
-# Install PyTorch and torchvision (fallback to pip on transient conda download failures)
-RUN /opt/conda/bin/conda run -n robomimic_venv conda install -y pytorch==2.4.1 torchvision==0.19.1 cpuonly -c pytorch
+# Install GPU-enabled PyTorch and torchvision
+RUN /opt/conda/bin/conda run -n robomimic_venv conda install -y pytorch==2.4.1 torchvision==0.19.1 pytorch-cuda=12.1 -c pytorch -c nvidia
 
 
 # Install robosuite at a pinned commit
