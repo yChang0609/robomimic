@@ -1,5 +1,14 @@
 # Base image with Python 3.9 and Linux
-FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+ARG GPU_SERIES=40
+ARG PYTORCH_VERSION=2.4.1
+ARG TORCHVISION_VERSION=0.19.1
+ARG PYTORCH_CUDA_VERSION=12.1
+ARG INSTALL_OPTIONAL=0
+ARG MIMICGEN_REPO=https://github.com/NVlabs/mimicgen_environments.git
+ARG MIMICGEN_REF=main
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -36,8 +45,24 @@ RUN /opt/conda/bin/conda tos accept --override-channels --channel https://repo.a
 # Create and activate robomimic conda environment with Python 3.9
 RUN /opt/conda/bin/conda create -n robomimic_venv python=3.9 -y
 
-# Install GPU-enabled PyTorch and torchvision
-RUN /opt/conda/bin/conda run -n robomimic_venv conda install -y pytorch==2.4.1 torchvision==0.19.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+# Install PyTorch and torchvision
+# Supported GPU_SERIES:
+# 40 -> conda: pytorch==2.4.1 torchvision==0.19.1 pytorch-cuda=12.1
+# 50 -> pip  : torch torchvision torchaudio from cu128 index
+RUN if [ "${GPU_SERIES}" = "40" ]; then \
+        /opt/conda/bin/conda run -n robomimic_venv conda install -y \
+            pytorch==${PYTORCH_VERSION} \
+            torchvision==${TORCHVISION_VERSION} \
+            pytorch-cuda=${PYTORCH_CUDA_VERSION} \
+            -c pytorch -c nvidia; \
+    elif [ "${GPU_SERIES}" = "50" ]; then \
+        /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir \
+            torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cu128; \
+    else \
+        echo "Unsupported GPU_SERIES=${GPU_SERIES} (use 40 or 50)"; \
+        exit 1; \
+    fi
 
 
 # Install robosuite at a pinned commit
@@ -47,6 +72,16 @@ RUN git clone https://github.com/ARISE-Initiative/robosuite.git && \
     git checkout b9d8d3de5e3dfd1724f4a0e6555246c460407daa && \
     /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir --retries 10 --timeout 120 --prefer-binary --only-binary=mujoco -r requirements.txt && \
     /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir -e . --no-deps
+
+# Optional: install MimicGen environments for additional task envs
+RUN if [ "${INSTALL_OPTIONAL}" = "1" ]; then \
+        git clone "${MIMICGEN_REPO}" /opt/mimicgen_environments && \
+        cd /opt/mimicgen_environments && \
+        git checkout "${MIMICGEN_REF}" && \
+        /opt/conda/bin/conda run -n robomimic_venv pip install --no-cache-dir --retries 10 --timeout 120 -e .; \
+    else \
+        echo "Skipping MimicGen installation (INSTALL_OPTIONAL=${INSTALL_OPTIONAL})"; \
+    fi
 
 # Install local robomimic package from this build context
 WORKDIR /workspace
