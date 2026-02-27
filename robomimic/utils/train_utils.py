@@ -423,13 +423,23 @@ def run_rollout(
                 video_count += 1
 
             if replaybuffer is not None:
+                # by default, use environment action for replay buffer (not normalized by default)
+                replay_action = ac 
+
+                # if using a residual policy with action normalization stats from the base policy, 
+                # we need to use the normalized action for the replay buffer
+                if policy.last_action_normalized is not None:
+                    replay_action = policy.last_action_normalized
+                
+                # treat rollout timeout as terminal to avoid critic bootstrap on horizon-truncated failures
+                terminal = done or success["task"] or (step_i == (horizon - 1))
                 buffer.add_step(
                     obs=policy_ob, 
                     next_obs=ob_dict, 
-                    action=ac, 
+                    action=replay_action, 
                     base_action=policy.last_base_action, 
                     reward=r, 
-                    done=(done or success["task"])
+                    done=terminal
                 )
                 
             # break if done
@@ -447,7 +457,8 @@ def run_rollout(
         for frame in video_frames:
             video_writer.append_data(frame)
 
-    end_step = end_step or step_i
+    if end_step is None:
+        end_step = step_i
     total_reward = np.sum(rews[:end_step + 1])
     
     results["Return"] = total_reward
@@ -587,9 +598,7 @@ def rollout_with_stats(
         if len(env_state_pool) > 0:
             sampled_init_states = _sample_init_states_for_rollouts(env_state_pool, env_num_episodes)
             print(
-                "rollout: env_key='{}' sampling {} episodes from {} init states".format(
-                    env_key, env_num_episodes, len(env_state_pool)
-                )
+                f"rollout: env_key='{env_key}' sampling {env_num_episodes} episodes from {len(env_state_pool)} init states"
             )
         else:
             sampled_init_states = [None] * env_num_episodes
@@ -809,7 +818,7 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
 
     step_log_all = []
     timing_stats = dict(Data_Loading=[], Process_Batch=[], Train_Batch=[], Log_Info=[])
-    start_time = time.time()
+    # start_time = time.time()
 
     data_loader_iter = iter(data_loader)
     for _ in LogUtils.custom_tqdm(range(num_steps)):
