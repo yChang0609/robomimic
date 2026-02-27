@@ -22,10 +22,12 @@ import robomimic.utils.log_utils as LogUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.lang_utils as LangUtils
 
+
 from robomimic.utils.dataset import SubtaskSequenceDataset, SequenceDataset, MetaDataset
+from robomimic.utils.replybuffer import ReplayBuffer, TransitionBuffer
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
-from robomimic.algo import RolloutPolicy
+from robomimic.algo import RolloutPolicy, ResidualRolloutPolicy
 
 def test_dataset_factory(dataset, config):
     # Retrieve the first sample from the dataset
@@ -324,7 +326,7 @@ def batchify_obs(obs_list):
     
     return obs
 
-
+# Run rollout function
 def run_rollout(
         policy, 
         env, 
@@ -334,6 +336,8 @@ def run_rollout(
         video_writer=None,
         video_skip=5,
         terminate_on_success=False,
+        replaybuffer:ReplayBuffer=None,
+        init_state=None
     ):
     """
     Runs a rollout in an environment with the current network parameters.
@@ -356,15 +360,19 @@ def run_rollout(
 
         terminate_on_success (bool): if True, terminate episode early as soon as a success is encountered
 
+        init_state (dict): optional simulator state used to reset environment via env.reset_to(init_state)
+
     Returns:
         results (dict): dictionary containing return, success rate, etc.
     """
-    assert isinstance(policy, RolloutPolicy)
+    assert isinstance(policy, RolloutPolicy) 
+    if replaybuffer is not None and "base_actions" in replaybuffer.keys:
+        assert isinstance(policy, ResidualRolloutPolicy)
     assert isinstance(env, EnvBase) or isinstance(env, EnvWrapper)
 
     policy.start_episode()
 
-    ob_dict = env.reset()
+    ob_dict = env.reset_to(init_state) if init_state else env.reset()
     goal_dict = None
     if use_goals:
         # retrieve goal from the environment
@@ -380,6 +388,8 @@ def run_rollout(
 
     video_frames = []
     
+    buffer = TransitionBuffer() if replaybuffer is not None else None
+
     try:
         for step_i in range(horizon):
             # get action from policy
@@ -412,6 +422,26 @@ def run_rollout(
 
                 video_count += 1
 
+            if replaybuffer is not None:
+                # by default, use environment action for replay buffer (not normalized by default)
+                replay_action = ac 
+
+                # if using a residual policy with action normalization stats from the base policy, 
+                # we need to use the normalized action for the replay buffer
+                if policy.last_action_normalized is not None:
+                    replay_action = policy.last_action_normalized
+                
+                # treat rollout timeout as terminal to avoid critic bootstrap on horizon-truncated failures
+                terminal = done or success["task"] or (step_i == (horizon - 1))
+                buffer.add_step(
+                    obs=policy_ob, 
+                    next_obs=ob_dict, 
+                    action=replay_action, 
+                    base_action=policy.last_base_action, 
+                    reward=r, 
+                    done=terminal
+                )
+                
             # break if done
             if done or (terminate_on_success and success["task"]):
                 end_step = step_i
@@ -420,12 +450,15 @@ def run_rollout(
     except env.rollout_exceptions as e:
         print("WARNING: got rollout exception {}".format(e))
 
+    if replaybuffer is not None:
+        replaybuffer.add(buffer)
 
     if video_writer is not None:
         for frame in video_frames:
             video_writer.append_data(frame)
 
-    end_step = end_step or step_i
+    if end_step is None:
+        end_step = step_i
     total_reward = np.sum(rews[:end_step + 1])
     
     results["Return"] = total_reward
@@ -439,7 +472,28 @@ def run_rollout(
 
     return results
 
+def _sample_init_states_for_rollouts(state_pool, num_episodes):
+    """
+    Randomly sample init states for rollout episodes.
 
+    - if @num_episodes <= len(state_pool), sample without replacement
+    - otherwise, use one shuffled full pass then sample the remainder with replacement
+    """
+    if num_episodes <= 0:
+        return []
+
+    pool_size = len(state_pool)
+    if num_episodes <= pool_size:
+        inds = np.random.choice(pool_size, size=num_episodes, replace=False)
+        return [state_pool[i] for i in inds]
+
+    sampled = [state_pool[i] for i in np.random.permutation(pool_size)]
+    extra_inds = np.random.choice(pool_size, size=(num_episodes - pool_size), replace=True)
+    sampled.extend(state_pool[i] for i in extra_inds)
+    return sampled
+
+
+# rollout warrper function
 def rollout_with_stats(
         policy,
         envs,
@@ -453,6 +507,8 @@ def rollout_with_stats(
         video_skip=5,
         terminate_on_success=False,
         verbose=False,
+        replaybuffer:ReplayBuffer=None,
+        init_states=None
     ):
     """
     A helper function used in the train loop to conduct evaluation rollouts per environment
@@ -486,6 +542,9 @@ def rollout_with_stats(
         terminate_on_success (bool): if True, terminate episode early as soon as a success is encountered
 
         verbose (bool): if True, print results of each rollout
+
+        init_states (dict): optional mapping env_key -> list of init-state dicts. If provided,
+            rollouts sample from these states and reset with env.reset_to(init_state) per episode.
     
     Returns:
         all_rollout_logs (dict): dictionary of rollout statistics (e.g. return, success rate, ...) 
@@ -521,13 +580,36 @@ def rollout_with_stats(
 
         env_name = env.name
 
+        env_state_pool = []
+        if init_states is not None:
+            env_state_pool = init_states.get(env_key, [])
+
+        if num_episodes is None:
+            if len(env_state_pool) == 0:
+                raise ValueError(
+                    "rollout_with_stats: num_episodes is None and no init_states provided for env_key '{}'".format(
+                        env_key
+                    )
+                )
+            env_num_episodes = len(env_state_pool)
+        else:
+            env_num_episodes = num_episodes
+
+        if len(env_state_pool) > 0:
+            sampled_init_states = _sample_init_states_for_rollouts(env_state_pool, env_num_episodes)
+            print(
+                f"rollout: env_key='{env_key}' sampling {env_num_episodes} episodes from {len(env_state_pool)} init states"
+            )
+        else:
+            sampled_init_states = [None] * env_num_episodes
+
         print("rollout: env={}, horizon={}, use_goals={}, num_episodes={}".format(
-            env_name, horizon, use_goals, num_episodes,
+            env_name, horizon, use_goals, env_num_episodes,
         ))
         rollout_logs = []
-        iterator = range(num_episodes)
+        iterator = range(env_num_episodes)
         if not verbose:
-            iterator = LogUtils.custom_tqdm(iterator, total=num_episodes)
+            iterator = LogUtils.custom_tqdm(iterator, total=env_num_episodes)
 
         num_success = 0
         for ep_i in iterator:
@@ -541,7 +623,10 @@ def rollout_with_stats(
                 video_writer=env_video_writer,
                 video_skip=video_skip,
                 terminate_on_success=terminate_on_success,
+                replaybuffer=replaybuffer,
+                init_state=sampled_init_states[ep_i]
             )
+            
             rollout_info["time"] = time.time() - rollout_timestamp
 
             rollout_logs.append(rollout_info)
@@ -566,7 +651,6 @@ def rollout_with_stats(
         video_writer.close()
 
     return all_rollout_logs, video_paths
-
 
 def should_save_from_rollout_logs(
         all_rollout_logs,
@@ -734,7 +818,7 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
 
     step_log_all = []
     timing_stats = dict(Data_Loading=[], Process_Batch=[], Train_Batch=[], Log_Info=[])
-    start_time = time.time()
+    # start_time = time.time()
 
     data_loader_iter = iter(data_loader)
     for _ in LogUtils.custom_tqdm(range(num_steps)):

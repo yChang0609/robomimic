@@ -122,9 +122,16 @@ venv.bak/
 # private macros
 macros_private.py
 
+# Project-local configs and generated outputs
 configs/*
 results/*
+tests/tmp_model_dir/*
+code_reports/*
+
+# Local helper scripts and tooling directories
 _tool/*
 run.sh
 eval.sh
+
+# Local editor workspace settings
 .vscode/*

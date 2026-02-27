@@ -1,0 +1,9 @@
+results/
+configs/
+_tool/
+.vscode/
+code_report/
+code_reports/
+*.egg
+*.egg-info/
+.eggs/

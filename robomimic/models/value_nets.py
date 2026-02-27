@@ -14,6 +14,7 @@ import torch.distributions as D
 
 import robomimic.utils.tensor_utils as TensorUtils
 from robomimic.models.obs_nets import MIMO_MLP
+from robomimic.models.base_nets import MLP
 from robomimic.models.distributions import DiscreteValueDistribution
 
 
@@ -198,6 +199,80 @@ class ActionValueNetwork(ValueNetwork):
 
     def _to_string(self):
         return "action_dim={}\nvalue_bounds={}".format(self.ac_dim, self.value_bounds)
+
+
+class ResidualActionValueNetwork(ActionValueNetwork):
+    """
+    Q network variant for residual policy training that encodes temporal observations,
+    flattens across time, and predicts a single Q value.
+    """
+    def __init__(
+        self,
+        obs_shapes,
+        ac_dim,
+        mlp_layer_dims,
+        observation_horizon,
+        value_bounds=None,
+        goal_shapes=None,
+        encoder_kwargs=None,
+    ):
+        self.observation_horizon = observation_horizon
+        super(ResidualActionValueNetwork, self).__init__(
+            obs_shapes=obs_shapes,
+            ac_dim=ac_dim,
+            mlp_layer_dims=mlp_layer_dims,
+            value_bounds=value_bounds,
+            goal_shapes=goal_shapes,
+            encoder_kwargs=encoder_kwargs,
+        )
+
+        single_frame_dim = self.nets["encoder"].output_shape()[0]
+        flattened_dim = single_frame_dim * self.observation_horizon
+        self.nets["mlp"] = MLP(
+            input_dim=flattened_dim,
+            output_dim=mlp_layer_dims[-1],
+            layer_dims=mlp_layer_dims[:-1],
+            activation=nn.ReLU,
+            output_activation=nn.ReLU,
+        )
+
+    def _align_sequence_length(self, x, target_t):
+        if x.shape[1] < target_t:
+            pad = x[:, -1:].repeat(1, target_t - x.shape[1], *([1] * (x.ndim - 2)))
+            x = torch.cat((x, pad), dim=1)
+        elif x.shape[1] > target_t:
+            x = x[:, -target_t:, ...]
+        return x
+
+    def forward(self, obs_dict, acts, goal_dict=None):
+        """
+        Forward pass with explicit action input. Supports [B, A] or [B, T, A] actions.
+        """
+        T = self.observation_horizon
+        inputs = {
+            "obs": dict(obs_dict),
+            "goal": goal_dict,
+        }
+        inputs["obs"]["action"] = acts
+
+        for k in self.obs_shapes:
+            x = inputs["obs"][k]
+            if x.ndim - 1 == len(self.obs_shapes[k]):
+                x = x.unsqueeze(1)
+            assert x.ndim - 2 == len(self.obs_shapes[k])
+            x = self._align_sequence_length(x, T)
+            inputs["obs"][k] = x
+
+        obs_features = TensorUtils.time_distributed(
+            inputs,
+            self.nets["encoder"],
+            inputs_as_kwargs=True,
+        )
+        mlp_out = self.nets["mlp"](obs_features.flatten(start_dim=1))
+        values = self.nets["decoder"](mlp_out)["value"]
+        if self.value_bounds is not None:
+            values = self._value_offset + self._value_scale * torch.tanh(values)
+        return values
 
 
 class DistributionalActionValueNetwork(ActionValueNetwork):

@@ -1,0 +1,509 @@
+import json
+import os
+import psutil
+import sys
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.time_utils as TimeUtils
+import robomimic.utils.train_utils as TrainUtils
+from robomimic.algo import (
+    ProgressiveResidualRolloutPolicy,
+    ResidualAlgo,
+    RolloutPolicy,
+    progressive_residual_action_prob,
+)
+from robomimic.utils.log_utils import DataLogger, PrintLogger
+from robomimic.utils.replybuffer import ReplayBuffer
+from robomimic.utils.save_utils import SaveManager
+
+from robomimic.scripts.training.utils import (
+    build_rollout_init_states_from_trainset,
+    create_envs_from_dataset,
+    create_model,
+    print_config,
+    set_seed,
+)
+
+
+def _log_action_normalization_diffs(
+    base_action_normalization_stats,
+    dataset_action_normalization_stats,
+    use_base_action_stats,
+):
+    """
+    Compare base-policy and dataset action-normalization stats, then print either
+    override logs (use_base_action_stats=True) or warning logs (False).
+    """
+    if dataset_action_normalization_stats is None:
+        return
+
+    for action_key in base_action_normalization_stats:
+        if action_key not in dataset_action_normalization_stats:
+            continue
+        base_stats = base_action_normalization_stats[action_key]
+        dataset_stats = dataset_action_normalization_stats[action_key]
+        offset_diff = float(
+            np.max(np.abs(base_stats["offset"] - dataset_stats["offset"]))
+        )
+        scale_diff = float(
+            np.max(np.abs(base_stats["scale"] - dataset_stats["scale"]))
+        )
+        if use_base_action_stats:
+            print(
+                f"Overriding action normalization stats from base policy for key='{action_key}': "
+                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
+            )
+        else:
+            print(
+                f"WARNING: Keeping dataset action normalization stats for key='{action_key}' "
+                f"(train.use_base_action_normalization_stats=False) despite mismatch: "
+                f"max|offset diff|={offset_diff:.6f}, max|scale diff|={scale_diff:.6f}"
+            )
+
+
+def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
+    # === set up directories, logging, and seeds ===
+    # first set seeds
+    set_seed(config)
+    torch.set_num_threads(2)
+
+    # print config for logging
+    print_config(config)
+    log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(
+        config, resume=resume, auto_remove_exp_dir=auto_remove_exp_dir
+    )
+
+    # path for latest model and backup (to support @resume functionality)
+    latest_model_path = os.path.join(time_dir, "last.pth")
+    latest_model_backup_path = os.path.join(time_dir, "last_bak.pth")
+
+    if config.experiment.logging.terminal_output_to_txt:
+        # log stdout and stderr to a text file
+        logger = PrintLogger(os.path.join(log_dir, "log.txt"))
+        sys.stdout = logger
+        sys.stderr = logger
+
+    # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
+    ObsUtils.initialize_obs_utils_with_config(config)
+
+    # create saver for saving models during training
+    model_saver = SaveManager()
+
+    # create data logger for logging training and rollout stats to Tensorboard
+    data_logger = DataLogger(log_dir, config, log_tb=config.experiment.logging.log_tb)
+
+    # create replaybuffer for RL training
+    replaybuffer = ReplayBuffer(
+        capacity=int(config.train.replaybuffer_capacity), obs_keys=config.all_obs_keys
+    )
+
+    # == set up envs, model, and datasets === 
+    # extract the metadata and shape metadata across all datasets
+    envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
+    env_name = env_meta_list[0]["env_name"]
+
+    force_reward_shaping = config.train.get("force_reward_shaping", None)
+    if force_reward_shaping is None:
+        print(
+            "Reward shaping override disabled (train.force_reward_shaping=None); "
+            "using env / dataset default reward mode."
+        )
+    else:
+        # keep existing square-task constraint for explicit reward-shaping overrides.
+        if "square" not in env_name.lower():
+            raise NotImplementedError(
+                "Reward-shaping override is only implemented for square task, got env '{}'".format(
+                    env_name
+                )
+            )
+
+        force_reward_shaping = bool(force_reward_shaping)
+        print(
+            "Forcing env reward_shaping={} from train.force_reward_shaping".format(
+                force_reward_shaping
+            )
+        )
+        for env in envs.values():
+            base_env = env.env
+            while True:
+                if hasattr(base_env, "_init_kwargs"):
+                    break
+                next_env = getattr(base_env, "env", None)
+                if (next_env is None) or (next_env is base_env):
+                    break
+                base_env = next_env
+            if not hasattr(base_env, "_init_kwargs"):
+                raise RuntimeError(
+                    "Failed to locate base env wrapper with init kwargs for reward-shaping override"
+                )
+            base_env._init_kwargs["reward_shaping"] = force_reward_shaping
+            rs_env = getattr(base_env, "env", None)
+            if (rs_env is None) or (not hasattr(rs_env, "reward_shaping")):
+                raise RuntimeError(
+                    "Failed to set reward_shaping={} for env '{}'".format(
+                        force_reward_shaping, base_env
+                    )
+                )
+            rs_env.reward_shaping = force_reward_shaping
+
+    # TODO [priority: Low] if give mutli dataset need change this rule
+    env_meta = env_meta_list[0]
+    shape_meta = shape_meta_list[0]
+    print("")
+
+    # load train and valid datasets for training
+    trainset, validset = TrainUtils.load_data_for_training(
+        config, obs_keys=shape_meta["all_obs_keys"]
+    )
+    print("\n============= Training Dataset =============")
+    print(trainset)
+    print("")
+    if validset is not None:
+        print("\n============= Validation Dataset =============")
+        print(validset)
+        print("")
+
+    # preload failed-demo init states once (for fast per-epoch rollout sampling)
+    rollout_init_states = build_rollout_init_states_from_trainset(
+        config=config, trainset=trainset
+    )
+
+    eval_rollout_num_episodes = int(config.experiment.rollout.n)
+    if eval_rollout_num_episodes <= 0:
+        raise ValueError(
+            f"config.experiment.rollout.n must be > 0, got {config.experiment.rollout.n}"
+        )
+
+    train_rollout_num_episodes = int(config.train.rollout_init_state_sample_size)
+    if train_rollout_num_episodes <= 0:
+        raise ValueError(
+            f"config.train.rollout_init_state_sample_size must be > 0, got {train_rollout_num_episodes}"
+        )
+
+    # maybe retreve statistics for normalizing observations
+    obs_normalization_stats = None
+    if config.train.repalybuffer_normalize_obs:
+        obs_normalization_stats = trainset.get_obs_normalization_stats()
+
+    # maybe retreve statistics for normalizing actions
+    action_normalization_stats = trainset.get_action_normalization_stats()
+
+    # add info to optim_params
+    train_num_steps = config.experiment.epoch_every_n_steps
+    with config.values_unlocked():
+        if "optim_params" in config.algo:
+            # add info to optim_params of each net
+            for k in config.algo.optim_params:
+                config.algo.optim_params[k]["num_train_batches"] = train_num_steps
+                config.algo.optim_params[k]["num_epochs"] = config.train.num_epochs
+
+    # create mdoel form config
+    model, variable_state = create_model(
+        config=config,
+        shape_meta=shape_meta,
+        device=device,
+        resume={
+            "latest_model_path": latest_model_path,
+            "latest_model_backup_path": latest_model_backup_path,
+        }
+        if resume
+        else None,
+    )
+
+    # if the algo is a residual algo, we may want to load the base policy checkpoint and extract normalization stats from it
+    if isinstance(model, ResidualAlgo):
+        base_policy_ckpt_path = getattr(
+            getattr(model.algo_config, "base_policy", None), "ckpt_path", None
+        )
+        if base_policy_ckpt_path is not None:
+            base_policy_ckpt_dict = FileUtils.load_dict_from_checkpoint(
+                ckpt_path=base_policy_ckpt_path
+            )
+
+            if config.train.repalybuffer_normalize_obs:
+                base_obs_normalization_stats = base_policy_ckpt_dict.get(
+                    "obs_normalization_stats", None
+                )
+                if base_obs_normalization_stats is not None:
+                    for obs_key in base_obs_normalization_stats:
+                        for stat_key in base_obs_normalization_stats[obs_key]:
+                            base_obs_normalization_stats[obs_key][stat_key] = np.array(
+                                base_obs_normalization_stats[obs_key][stat_key]
+                            )
+                    obs_normalization_stats = base_obs_normalization_stats
+
+            use_base_action_stats = config.train.get(
+                "use_base_action_normalization_stats", False
+            )
+            base_action_normalization_stats = base_policy_ckpt_dict.get(
+                "action_normalization_stats", None
+            )
+            if base_action_normalization_stats is None:
+                if use_base_action_stats:
+                    print(
+                        "\nWARNING: train.use_base_action_normalization_stats is True, but base checkpoint has no action_normalization_stats. "
+                        "Falling back to dataset action stats."
+                    )
+            else:
+                # convert stats from checkpoint to numpy arrays
+                for action_key in base_action_normalization_stats:
+                    for stat_key in base_action_normalization_stats[action_key]:
+                        base_action_normalization_stats[action_key][stat_key] = np.array(
+                            base_action_normalization_stats[action_key][stat_key]
+                        )
+
+                # always compare base stats vs dataset stats when both are available,
+                # even if we keep dataset stats (use_base_action_stats=False).
+                if action_normalization_stats is not None:
+                    _log_action_normalization_diffs(
+                        base_action_normalization_stats=base_action_normalization_stats,
+                        dataset_action_normalization_stats=action_normalization_stats,
+                        use_base_action_stats=use_base_action_stats,
+                    )
+                elif use_base_action_stats:
+                    print(
+                        "\nWARNING: No dataset action normalization stats available; "
+                        "using base policy action normalization stats without a mismatch check."
+                    )
+
+                if use_base_action_stats:
+                    action_normalization_stats = base_action_normalization_stats
+
+    # save the config as a json file
+    with open(os.path.join(log_dir, "..", "config.json"), "w") as outfile:
+        json.dump(config, outfile, indent=4)
+
+    # === main training loop === 
+    best_return = {k: -np.inf for k in envs}
+    best_success_rate = {k: -1.0 for k in envs}
+    residual_eval_every_n_epochs = int(config.experiment.rollout.get("rate", 1)) 
+    if residual_eval_every_n_epochs <= 0:
+        raise ValueError(
+            f"config.experiment.rollout.rate must be > 0, got {residual_eval_every_n_epochs}"
+        )
+
+    start_epoch = 1  # epoch numbers start at 1
+    if resume:
+        # load variable state needed for train loop
+        start_epoch = variable_state["epoch"] + 1
+        best_return = variable_state["best_return"]
+        best_success_rate = variable_state["best_success_rate"]
+        print("*" * 50)
+        print("resuming training from epoch {}".format(start_epoch))
+        print("*" * 50)
+
+    training_timer = TimeUtils.TrainingTimer()
+    for epoch in range(start_epoch, config.train.num_epochs + 1):
+        # warpper for rollout policy if using a residual algo to support progressive residual action sampling during rollouts
+        if isinstance(model, ResidualAlgo):
+            residual_action_prob = progressive_residual_action_prob(len(replaybuffer))
+            rollout_model = ProgressiveResidualRolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+                residual_action_prob=residual_action_prob,
+            )
+        else:
+            rollout_model = RolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+            )
+
+        # perform rollouts with the rollout policy and collect data in the replaybuffer
+        rollout_log, _ = TrainUtils.rollout_with_stats(
+            policy=rollout_model,
+            envs=envs,
+            horizon=config.experiment.rollout.horizon,
+            num_episodes=train_rollout_num_episodes,
+            use_goals=config.use_goals,
+            render=False,
+            video_dir=video_dir if config.experiment.render_video else None,
+            terminate_on_success=config.experiment.rollout.terminate_on_success,
+            epoch=epoch,
+            replaybuffer=replaybuffer,
+            init_states=rollout_init_states,
+        )
+
+        if len(replaybuffer) < config.train.batch_size:
+            continue
+
+        # set up dataloader for training with replaybuffer
+        replay_loader = DataLoader(
+            replaybuffer,
+            batch_size=config.train.batch_size,
+            shuffle=True,
+            num_workers=0,
+            drop_last=True,
+        )
+
+        # train for one epoch and log stats
+        step_log = TrainUtils.run_epoch(
+            model=model,
+            data_loader=replay_loader,
+            epoch=epoch,
+            num_steps=train_num_steps,
+            obs_normalization_stats=obs_normalization_stats,
+        )
+        model.on_epoch_end(epoch)
+
+        # print out training stats and rollout stats for the epoch
+        print("Train Epoch {}".format(epoch))
+        print(json.dumps(step_log, sort_keys=True, indent=4))
+        rollout_success_rate = np.mean(
+            [
+                env_rollout_log["Success_Rate"]
+                for env_rollout_log in rollout_log.values()
+            ]
+        )
+        rollout_horizon_mean = np.mean(
+            [env_rollout_log["Horizon"] for env_rollout_log in rollout_log.values()]
+        )
+        data_logger.record("Rollout/Success_Rate", rollout_success_rate, epoch)
+        data_logger.record("Rollout/Horizon_Mean", rollout_horizon_mean, epoch)
+        data_logger.record("ReplayBuffer/Length", len(replaybuffer), epoch)
+        if isinstance(model, ResidualAlgo):
+            data_logger.record(
+                "Train/Progressive_Residual_Action_Prob", residual_action_prob, epoch
+            )
+
+        for k, v in step_log.items():
+            if k.startswith("Time_"):
+                data_logger.record("Timing_Stats/Train_{}".format(k[5:]), v, epoch)
+            else:
+                data_logger.record("Train/{}".format(k), v, epoch)
+        for env_name, env_rollout_log in rollout_log.items():
+            print(
+                "\nEpoch {} Rollouts took {}s (avg) with results:".format(
+                    epoch, env_rollout_log["time"]
+                )
+            )
+            print("Env: {}".format(env_name))
+            print(json.dumps(env_rollout_log, sort_keys=True, indent=4))
+        
+
+        eval_rollout_log = None
+        if isinstance(model, ResidualAlgo):
+            if epoch % residual_eval_every_n_epochs == 0:
+                residual_eval_model = ProgressiveResidualRolloutPolicy(
+                    model,
+                    obs_normalization_stats=obs_normalization_stats,
+                    action_normalization_stats=action_normalization_stats,
+                    residual_action_prob=1.0,
+                )
+                eval_rollout_log, _ = TrainUtils.rollout_with_stats(
+                    policy=residual_eval_model,
+                    envs=envs,
+                    horizon=config.experiment.rollout.horizon,
+                    num_episodes=eval_rollout_num_episodes,
+                    use_goals=config.use_goals,
+                    render=False,
+                    video_dir=None,
+                    terminate_on_success=config.experiment.rollout.terminate_on_success,
+                    epoch=epoch,
+                    replaybuffer=None,
+                    init_states=rollout_init_states,
+                )
+                eval_success_rate = np.mean(
+                    [
+                        env_rollout_log["Success_Rate"]
+                        for env_rollout_log in eval_rollout_log.values()
+                    ]
+                )
+                eval_horizon_mean = np.mean(
+                    [env_rollout_log["Horizon"] for env_rollout_log in eval_rollout_log.values()]
+                )
+                data_logger.record("ResidualEval/Success_Rate", eval_success_rate, epoch)
+                data_logger.record("ResidualEval/Horizon_Mean", eval_horizon_mean, epoch)
+                for env_name, env_rollout_log in eval_rollout_log.items():
+                    print(
+                        f"\nEpoch {epoch} Residual Eval Rollouts took {env_rollout_log['time']}s (avg) with results:"
+                    )
+                    print("Env: {}".format(env_name))
+                    print(json.dumps(env_rollout_log, sort_keys=True, indent=4))
+
+        epoch_ckpt_name = f"model_epoch_{epoch}"
+        updated_stats = dict(
+            best_return=best_return,
+            best_success_rate=best_success_rate,
+            epoch_ckpt_name=epoch_ckpt_name,
+            should_save_ckpt=False,
+        )
+        if eval_rollout_log is not None:
+            updated_stats = TrainUtils.should_save_from_rollout_logs(
+                all_rollout_logs=eval_rollout_log,
+                best_return=best_return,
+                best_success_rate=best_success_rate,
+                epoch_ckpt_name=epoch_ckpt_name,
+                save_on_best_rollout_return=config.experiment.save.on_best_rollout_return,
+                save_on_best_rollout_success_rate=config.experiment.save.on_best_rollout_success_rate,
+            )
+            best_return = updated_stats["best_return"]
+            best_success_rate = updated_stats["best_success_rate"]
+            epoch_ckpt_name = updated_stats["epoch_ckpt_name"]
+
+        should_save_ckpt = False
+        if config.experiment.save.enabled:
+            should_save_ckpt = updated_stats["should_save_ckpt"]
+        if (
+            config.experiment.save.enabled
+            and config.experiment.save.every_n_epochs
+            and (epoch % config.experiment.save.every_n_epochs == 0)
+        ):
+            should_save_ckpt = True
+
+        variable_state = dict(
+            epoch=epoch,
+            best_return=best_return,
+            best_success_rate=best_success_rate,
+            best_valid_loss=None,
+        )
+        if should_save_ckpt:
+            TrainUtils.save_model(
+                model=model,
+                config=config,
+                env_meta=env_meta,
+                shape_meta=shape_meta,
+                variable_state=variable_state,
+                ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+                saver=model_saver,
+                is_temp=False,
+            )
+        print("\nsaving latest model at {}...\n".format(latest_model_path))
+        TrainUtils.save_model(
+            model=model,
+            config=config,
+            env_meta=env_meta,
+            shape_meta=shape_meta,
+            variable_state=variable_state,
+            ckpt_path=latest_model_path,
+            obs_normalization_stats=obs_normalization_stats,
+            action_normalization_stats=action_normalization_stats,
+            saver=model_saver,
+            is_temp=True,
+        )
+        process = psutil.Process(os.getpid())
+        mem_usage = int(process.memory_info().rss / 1024 / 1024)
+        data_logger.record("System/RAM Usage (MB)", mem_usage, epoch)
+    print(f"RL Training Complete. Total Time: {training_timer.get_elapsed_time()}")
+
+    for env in envs.values():
+        base_env = env
+        while True:
+            next_env = getattr(base_env, "env", None)
+            if (next_env is None) or (next_env is base_env):
+                break
+            base_env = next_env
+        close_fn = getattr(base_env, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+    model_saver.stop()
+    data_logger.close()

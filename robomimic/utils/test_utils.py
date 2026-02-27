@@ -14,7 +14,7 @@ import robomimic
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 from robomimic.config import Config, config_factory
-from robomimic.scripts.train import train
+from robomimic.scripts.train import il_train, rl_train
 
 
 def maybe_remove_dir(dir_to_remove):
@@ -165,7 +165,7 @@ def get_base_config(algo_name):
     config.experiment.rollout.enabled = True
     config.experiment.rollout.rate = 1
     config.experiment.rollout.n = 1
-    config.experiment.rollout.horizon = 10
+    # config.experiment.rollout.horizon = 10
     config.experiment.render_video = True
 
     # turn off logging to stdout, since that can interfere with testing code outputs
@@ -240,6 +240,16 @@ def test_eval_agent_from_checkpoint(ckpt_path, device):
         ac = policy(ob=ob_dict)
         ob_dict, r, done, _ = env.step(ac)
 
+   
+    base_env = env
+    while True:
+        next_env = getattr(base_env, "env", None)
+        if (next_env is None) or (next_env is base_env):
+            break
+        base_env = next_env
+    close_fn = getattr(base_env, "close", None)
+    if callable(close_fn):
+        close_fn()
 
 def test_run(base_config, config_modifier):
     """
@@ -270,7 +280,8 @@ def test_run(base_config, config_modifier):
         device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
 
         # run training
-        train(config, device=device)
+        train_func = il_train if config.train.training_mode == "IL" else rl_train
+        train_func(config, device=device)
 
         # test evaluating a trained agent using saved checkpoint
         ckpt_path = checkpoint_path_from_test_run()
