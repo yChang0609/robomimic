@@ -100,6 +100,7 @@ class ResidualPolicy(ResidualAlgo):
         self.gamma = self.algo_config.rl.gamma
         self.tau = self.algo_config.rl.tau
         self.alpha = self.algo_config.rl.alpha
+        self.residual_reg_weight = float(self.algo_config.residual.get("regularization_weight", 1e-3))
 
         # Queues for inference (inherited from PolicyAlgo but we explicitly manage them)
         self.reset()
@@ -257,8 +258,7 @@ class ResidualPolicy(ResidualAlgo):
         q2_pi = self.nets["critic"][1](obs_dict=obs, acts=new_action)
         min_q_pi = torch.min(q1_pi, q2_pi)
         
-        # TODO [priority: high] regularization weight needs to be access from config
-        reg_loss = 1e-3 * (scaled_residual ** 2).mean()
+        reg_loss = self.residual_reg_weight * (scaled_residual ** 2).mean()
         actor_loss = (self.alpha * log_prob - min_q_pi).mean() + reg_loss
 
         if not validate:
