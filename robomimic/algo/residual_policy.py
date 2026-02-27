@@ -20,7 +20,7 @@ import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.file_utils as FileUtils
 from robomimic.algo import register_algo_factory_func, PolicyAlgo, algo_factory, ResidualAlgo
-from robomimic.models.policy_nets import ResidualGaussianActorNetwork
+from robomimic.models.policy_nets import ResidualGaussianActorNetwork, ResidualScaleNetwork
 
 @register_algo_factory_func("residual_policy")
 def algo_config_to_class(algo_config):
@@ -65,6 +65,17 @@ class ResidualPolicy(ResidualAlgo):
             use_tanh=True 
         )
 
+        self.learn_scale = bool(self.algo_config.residual.learn_scale)
+        self.residual_scale = 1.0 if self.learn_scale else float(self.algo_config.residual.scale_factor)
+        if self.learn_scale:
+            self.nets["res_scale"] = ResidualScaleNetwork(
+                obs_shapes=base_obs_shapes,
+                mlp_layer_dims=self.algo_config.residual.layer_dims,
+                goal_shapes=self.goal_shapes,
+                encoder_kwargs=encoder_kwargs,
+                observation_horizon=observation_horizon,
+            )
+
         # Create Critic (Double Q)
         def create_critic_net():
             return ValueNets.ResidualActionValueNetwork(
@@ -89,10 +100,23 @@ class ResidualPolicy(ResidualAlgo):
         self.gamma = self.algo_config.rl.gamma
         self.tau = self.algo_config.rl.tau
         self.alpha = self.algo_config.rl.alpha
-        self.residual_scale = self.algo_config.residual.scale_factor 
 
         # Queues for inference (inherited from PolicyAlgo but we explicitly manage them)
         self.reset()
+
+    def _create_optimizers(self):
+        super(ResidualPolicy, self)._create_optimizers()
+        if self.learn_scale:
+            self.optimizers["res_scale"] = TorchUtils.optimizer_from_optim_params(
+                net_optim_params=self.optim_params["res_policy"],
+                net=self.nets["res_scale"],
+            )
+            self.lr_schedulers["res_scale"] = TorchUtils.lr_scheduler_from_optim_params(
+                net_optim_params=self.optim_params["res_policy"],
+                net=self.nets["res_scale"],
+                optimizer=self.optimizers["res_scale"],
+            )
+            self.step_lr_schedulers_every_batch["res_scale"] = self.step_lr_schedulers_every_batch["res_policy"]
 
     def process_batch_for_training(self, batch):
         """
@@ -172,6 +196,11 @@ class ResidualPolicy(ResidualAlgo):
             log_prob = dist.log_prob(residual).unsqueeze(-1)
         return residual, log_prob
 
+    def _get_residual_scale(self, obs_dict, goal_dict=None):
+        if not self.learn_scale:
+            return self.residual_scale
+        return self.residual_scale * self.nets["res_scale"](obs_dict=obs_dict, goal_dict=goal_dict)
+
     def train_on_batch(self, batch, epoch, validate=False):
         """
         SAC Update Logic with Residuals.
@@ -188,7 +217,8 @@ class ResidualPolicy(ResidualAlgo):
             base_next_action = self._get_base_action_tensor(next_obs)
             next_res_obs = self._obs_with_action(next_obs, base_next_action)
             next_residual, next_log_prob = self._sample_residual_and_log_prob(next_res_obs)
-            next_action = torch.clamp(base_next_action + self.residual_scale * next_residual, -1.0, 1.0)
+            next_scale = self._get_residual_scale(next_obs)
+            next_action = torch.clamp(base_next_action + next_scale * next_residual, -1.0, 1.0)
 
             q1_next = self.nets["critic_target"][0](obs_dict=next_obs, acts=next_action)
             q2_next = self.nets["critic_target"][1](obs_dict=next_obs, acts=next_action)
@@ -220,19 +250,25 @@ class ResidualPolicy(ResidualAlgo):
 
         res_obs = self._obs_with_action(obs, base_action)
         residual, log_prob = self._sample_residual_and_log_prob(res_obs)
-        scaled_residual = self.residual_scale * residual
+        residual_scale = self._get_residual_scale(obs)
+        scaled_residual = residual_scale * residual
         new_action = torch.clamp(base_action + scaled_residual, -1.0, 1.0)
         q1_pi = self.nets["critic"][0](obs_dict=obs, acts=new_action)
         q2_pi = self.nets["critic"][1](obs_dict=obs, acts=new_action)
         min_q_pi = torch.min(q1_pi, q2_pi)
-
+        
+        # TODO [priority: high] regularization weight needs to be access from config
         reg_loss = 1e-3 * (scaled_residual ** 2).mean()
         actor_loss = (self.alpha * log_prob - min_q_pi).mean() + reg_loss
 
         if not validate:
             self.optimizers["res_policy"].zero_grad(set_to_none=True)
+            if self.learn_scale:
+                self.optimizers["res_scale"].zero_grad(set_to_none=True)
             actor_loss.backward()
             self.optimizers["res_policy"].step()
+            if self.learn_scale:
+                self.optimizers["res_scale"].step()
 
         for critic in self.nets["critic"]:
             for p in critic.parameters():
@@ -251,6 +287,10 @@ class ResidualPolicy(ResidualAlgo):
         info["actor/loss"] = actor_loss.item()
         info["actor/log_prob"] = log_prob.mean().item()
         info["actor/residual_l2"] = (scaled_residual ** 2).mean().item()
+        if torch.is_tensor(residual_scale):
+            info["actor/residual_scale"] = residual_scale.mean().item()
+        else:
+            info["actor/residual_scale"] = float(residual_scale)
         return info
     
     def log_info(self, info):
@@ -291,6 +331,8 @@ class ResidualPolicy(ResidualAlgo):
             log["Actor/Log_Prob"] = info["actor/log_prob"]
         if "actor/residual_l2" in info:
             log["Actor/Residual_L2"] = info["actor/residual_l2"]
+        if "actor/residual_scale" in info:
+            log["Actor/Residual_Scale"] = info["actor/residual_scale"]
         return log
     
     def reset(self):
@@ -325,7 +367,7 @@ class ResidualPolicy(ResidualAlgo):
             res_action = self.nets["res_policy"](obs_dict=actor_obs, goal_dict=goal_dict)
             # res_action = self._get_residual_action(obs_dict=obs_dict, goal_dict=goal_dict)
 
-        total_action = self.mix_actions(base_action, res_action)
+        total_action = self.mix_actions(base_action, res_action, obs_dict=obs_dict, goal_dict=goal_dict)
         total_action = torch.clamp(total_action, -1.0, 1.0)
         return total_action, base_action, res_action
     
@@ -356,7 +398,7 @@ class ResidualPolicy(ResidualAlgo):
         return residual_action
 
 
-    def mix_actions(self, base_action, residual_action):
+    def mix_actions(self, base_action, residual_action, obs_dict=None, goal_dict=None):
         """
         Mix base action and residual action to get the final action.
 
@@ -367,8 +409,8 @@ class ResidualPolicy(ResidualAlgo):
         Returns:
             action (torch.Tensor): total action tensor
         """
-        action = base_action + residual_action * self.residual_scale
-        # action = torch.clamp(action, -1.0, 1.0)
+        residual_scale = self._get_residual_scale(obs_dict, goal_dict) if self.learn_scale and obs_dict is not None else self.residual_scale
+        action = base_action + residual_action * residual_scale
         return action
     
     def _soft_update_target_network(self, source_network, target_network, tau):
