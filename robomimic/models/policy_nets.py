@@ -452,6 +452,53 @@ class ResidualGaussianActorNetwork(GaussianActorNetwork):
         if self.use_tanh:
             dist = TanhWrappedDistribution(base_dist=dist, scale=1.)
         return dist
+
+
+class ResidualScaleNetwork(ActorNetwork):
+    """
+    Predicts a per-sample residual scale in [0, 1] from temporally-aligned observations.
+    """
+    def __init__(self, obs_shapes, mlp_layer_dims, observation_horizon, **kwargs):
+        self.observation_horizon = observation_horizon
+        super(ResidualScaleNetwork, self).__init__(
+            obs_shapes=obs_shapes,
+            ac_dim=1,
+            mlp_layer_dims=mlp_layer_dims,
+            **kwargs
+        )
+        single_frame_dim = self.nets["encoder"].output_shape()[0]
+        flattened_dim = single_frame_dim * self.observation_horizon
+
+        from robomimic.models.base_nets import MLP
+        self.nets["mlp"] = MLP(
+            input_dim=flattened_dim,
+            output_dim=mlp_layer_dims[-1],
+            layer_dims=mlp_layer_dims[:-1],
+            activation=nn.ReLU,
+            output_activation=nn.ReLU,
+        )
+
+    def _get_output_shapes(self):
+        return OrderedDict(scale=(1,))
+
+    def forward(self, obs_dict, goal_dict=None):
+        inputs = {
+            "obs": obs_dict,
+            "goal": goal_dict
+        }
+        for k in self.obs_shapes:
+            if inputs["obs"][k].ndim - 1 == len(self.obs_shapes[k]):
+                inputs["obs"][k] = inputs["obs"][k].unsqueeze(1)
+            assert inputs["obs"][k].ndim - 2 == len(self.obs_shapes[k])
+
+        obs_features = TensorUtils.time_distributed(
+            inputs,
+            self.nets["encoder"],
+            inputs_as_kwargs=True,
+        )
+        mlp_out = self.nets["mlp"](obs_features.flatten(start_dim=1))
+        scale_logits = self.nets["decoder"](mlp_out)["scale"]
+        return torch.sigmoid(scale_logits)
     
 class GMMActorNetwork(ActorNetwork):
     """
@@ -1627,5 +1674,4 @@ class VAEActor(Module):
             mod = list(obs_dict.keys())[0]
             n = obs_dict[mod].shape[0]
         return self.decode(obs_dict=obs_dict, goal_dict=goal_dict, z=z, n=n)["action"]
-
 

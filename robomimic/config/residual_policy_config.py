@@ -74,6 +74,7 @@ class ResidualPolicyConfig(BaseConfig):
         self.algo.residual.mode = "additive"
         self.algo.residual.scale_factor = 0.1
         self.algo.residual.learn_scale = False
+        self.algo.residual.regularization_weight = 1e-3
         self.algo.residual.temporal_alignment = "sequence"
 
         # Residual network parameters
