@@ -376,7 +376,14 @@ def config_from_checkpoint(algo_name=None, ckpt_path=None, ckpt_dict=None, verbo
     return config, ckpt_dict
 
 
-def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=False):
+def policy_from_checkpoint(
+    device=None,
+    ckpt_path=None,
+    ckpt_dict=None,
+    verbose=False,
+    rollout_wrapper=None,
+    rollout_wrapper_kwargs=None,
+):
     """
     This function restores a trained policy from a checkpoint file or
     loaded model dictionary.
@@ -446,11 +453,27 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     )
     model.deserialize(ckpt_dict["model"])
     model.set_eval()
-    model = RolloutPolicy(
+
+    if rollout_wrapper is None:
+        rollout_wrapper = RolloutPolicy
+    else:
+        if (not isinstance(rollout_wrapper, type)) or (not issubclass(rollout_wrapper, RolloutPolicy)):
+            raise TypeError(
+                "rollout_wrapper must be a RolloutPolicy subclass, got {}".format(
+                    type(rollout_wrapper).__name__
+                )
+            )
+
+    if rollout_wrapper_kwargs is None:
+        rollout_wrapper_kwargs = {}
+
+    model = rollout_wrapper(
         model,
         obs_normalization_stats=obs_normalization_stats,
-        action_normalization_stats=action_normalization_stats
+        action_normalization_stats=action_normalization_stats,
+        **rollout_wrapper_kwargs
     )
+
     if verbose:
         print("============= Loaded Policy =============")
         print(model)
