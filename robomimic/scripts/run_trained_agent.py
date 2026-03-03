@@ -69,6 +69,7 @@ import robomimic.utils.log_utils as LogUtils
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
+from robomimic.scripts.training.utils import env_close
 
 
 def rollout(policy, env, horizon, render=False, video_writer=None, video_skip=5, return_obs=False, camera_names=None):
@@ -275,7 +276,8 @@ def run_trained_agent(args):
         data_grp.attrs["env_args"] = json.dumps(env.serialize(), indent=4) # environment info
         data_writer.close()
         print("Wrote dataset trajectories to {}".format(args.dataset_path))
-    env.env.close()
+        
+    env_close(env)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -208,3 +208,19 @@ def create_model(config, shape_meta, device, resume=None):
 
     return model, ckpt_dict["variable_state"] if resume is not None else None
 
+def env_close(env):
+    base_env = env
+    while True:
+        next_env = getattr(base_env, "env", None)
+        if (next_env is None) or (next_env is base_env):
+            break
+        base_env = next_env
+    close_fn = getattr(base_env, "close", None)
+    
+    # if the base env has a close function, call it. Otherwise, return False to indicate that we were not able to close the env.
+    if callable(close_fn):
+        close_fn()
+    else:
+        return False
+    
+    return True

@@ -15,6 +15,7 @@ from robomimic.algo import ResidualRolloutPolicy, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
+from robomimic.scripts.training.utils import env_close
 
 
 def run_rollout(
@@ -231,7 +232,8 @@ def inference(args):
         failed_file.close()
     if video_writer:
         video_writer.close()
-    env.close()
+        
+    env_close(env)
 
 
 if __name__ == "__main__":

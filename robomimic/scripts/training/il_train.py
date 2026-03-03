@@ -18,7 +18,7 @@ from robomimic.utils.log_utils import DataLogger, PrintLogger, flush_warnings
 from robomimic.utils.python_utils import deep_update
 from robomimic.utils.save_utils import SaveManager
 
-from robomimic.scripts.training.utils import create_env, print_config, set_seed
+from robomimic.scripts.training.utils import create_env, print_config, set_seed, env_close
 
 def il_train(config, device, resume=False, auto_remove_exp_dir=False):
     """
@@ -431,3 +431,6 @@ def il_train(config, device, resume=False, auto_remove_exp_dir=False):
     print(f"Training time({config.train.num_epochs + 1 - start_epoch} epoch): {training_timer.get_elapsed_time()}")
     model_saver.stop()
     data_logger.close()
+    
+    for env in envs.values():
+        env_close(env)

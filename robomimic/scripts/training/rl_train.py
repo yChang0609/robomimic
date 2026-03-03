@@ -27,6 +27,7 @@ from robomimic.scripts.training.utils import (
     create_model,
     print_config,
     set_seed,
+    env_close
 )
 
 
@@ -495,15 +496,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     print(f"RL Training Complete. Total Time: {training_timer.get_elapsed_time()}")
 
     for env in envs.values():
-        base_env = env
-        while True:
-            next_env = getattr(base_env, "env", None)
-            if (next_env is None) or (next_env is base_env):
-                break
-            base_env = next_env
-        close_fn = getattr(base_env, "close", None)
-        if callable(close_fn):
-            close_fn()
+        env_close(env)
 
     model_saver.stop()
     data_logger.close()
