@@ -287,6 +287,9 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         raise ValueError(
             f"config.experiment.rollout.rate must be > 0, got {residual_eval_every_n_epochs}"
         )
+    collect_sample_residual_actions = bool(
+        config.train.get("rollout_exploration", {}).get("sample_residual_actions", False)
+    )
 
     start_epoch = 1  # epoch numbers start at 1
     if resume:
@@ -308,6 +311,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                 obs_normalization_stats=obs_normalization_stats,
                 action_normalization_stats=action_normalization_stats,
                 residual_action_prob=residual_action_prob,
+                sample_residual_actions=collect_sample_residual_actions,
             )
         else:
             rollout_model = RolloutPolicy(
@@ -396,6 +400,7 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                     obs_normalization_stats=obs_normalization_stats,
                     action_normalization_stats=action_normalization_stats,
                     residual_action_prob=1.0,
+                    sample_residual_actions=False,
                 )
                 eval_rollout_log, _ = TrainUtils.rollout_with_stats(
                     policy=residual_eval_model,

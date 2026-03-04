@@ -31,6 +31,12 @@ class ResidualPolicyConfig(BaseConfig):
         # by default use action normalization stats from the current training dataset
         # instead of overriding with base-policy checkpoint stats
         self.train.use_base_action_normalization_stats = False
+
+        # optional exploration toggle for rollout data collection.
+        # if True, train rollouts sample residual actions stochastically
+        # (by disabling low_noise_eval on residual actor only during collection).
+        # this does not affect residual evaluation rollouts.
+        self.train.rollout_exploration.sample_residual_actions = False
     
     def algo_config(self):
         """

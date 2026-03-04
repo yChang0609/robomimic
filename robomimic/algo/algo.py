@@ -716,22 +716,44 @@ class ProgressiveResidualRolloutPolicy(ResidualRolloutPolicy):
     """
     Residual rollout policy with stochastic residual gating.
     """
-    def __init__(self, policy, obs_normalization_stats=None, action_normalization_stats=None, residual_action_prob=1.0):
+    def __init__(
+        self,
+        policy,
+        obs_normalization_stats=None,
+        action_normalization_stats=None,
+        residual_action_prob=1.0,
+        sample_residual_actions=False,
+    ):
         super().__init__(
             policy=policy,
             obs_normalization_stats=obs_normalization_stats,
             action_normalization_stats=action_normalization_stats,
         )
         self.residual_action_prob = float(np.clip(residual_action_prob, 0.0, 1.0))
+        self.sample_residual_actions = bool(sample_residual_actions)
 
     def __call__(self, ob, goal=None, batched_ob=False):
-        if self.residual_action_prob >= 1.0:
-            return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
-
         original_scale = self.policy.residual_scale
-        if np.random.rand() >= self.residual_action_prob:
+        original_low_noise_eval = None
+        residual_actor = None
+        #
+        if hasattr(self.policy, "nets"):
+            residual_actor = self.policy.nets["res_policy"]
+
+        if (
+            self.sample_residual_actions
+            and residual_actor is not None
+            and hasattr(residual_actor, "low_noise_eval")
+        ):
+            original_low_noise_eval = residual_actor.low_noise_eval
+            residual_actor.low_noise_eval = False
+
+        if self.residual_action_prob < 1.0 and np.random.rand() >= self.residual_action_prob:
             self.policy.residual_scale = 0.0
+
         try:
             return super().__call__(ob=ob, goal=goal, batched_ob=batched_ob)
         finally:
             self.policy.residual_scale = original_scale
+            if original_low_noise_eval is not None:
+                residual_actor.low_noise_eval = original_low_noise_eval
