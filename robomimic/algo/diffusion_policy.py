@@ -91,6 +91,18 @@ class DiffusionPolicyUNet(PolicyAlgo):
         nets = nets.float().to(self.device)
         
         # setup noise scheduler
+        # Debug for DDIM: use more inference steps than training steps to improve performance, since we are not constrained by real-time control during inference
+        with self.algo_config.unlocked():
+            self.algo_config.ddpm.enabled = False
+            self.algo_config.ddim.enabled = True
+            self.algo_config.ddim.num_train_timesteps = 50 
+            self.algo_config.num_inference_timesteps = 16
+            self.algo_config.ddim.beta_schedule = "squaredcos_cap_v2"
+            self.algo_config.ddim.clip_sample = True
+            self.algo_config.ddim.set_alpha_to_one = False
+            self.algo_config.ddim.steps_offset = 1
+            self.algo_config.ddim.prediction_type = "epsilon"
+
         noise_scheduler = None
         if self.algo_config.ddpm.enabled:
             noise_scheduler = DDPMScheduler(
