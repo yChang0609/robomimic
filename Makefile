@@ -30,7 +30,7 @@ BUILD_ARGS = \
 	--build-arg MIMICGEN_REPO=$(MIMICGEN_REPO) \
 	--build-arg MIMICGEN_REF=$(MIMICGEN_REF)
 
-.PHONY: help validate print-config build run run-tail
+.PHONY: help validate print-config build run run-tail exec
 
 help:
 	@echo "Usage:"
@@ -88,3 +88,6 @@ run-tail: validate print-config
 		-v "$(CURDIR)":/workspace \
 		-v "$(DATASETS_DIR)":/datasets \
 		$(RUN_IMAGE) tail -f /dev/null
+
+exec: validate print-config
+	docker exec -it $(CONTAINER_NAME) /bin/bash -c "source /opt/conda/etc/profile.d/conda.sh && conda activate robomimic_venv && bash"
