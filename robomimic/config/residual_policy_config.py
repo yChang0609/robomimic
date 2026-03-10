@@ -20,9 +20,8 @@ class ResidualPolicyConfig(BaseConfig):
         self.train.hdf5_load_next_obs = False
 
         # optional reward shaping override during RL rollout collection.
-        # None => do not override env / dataset reward_shaping setting.
         # bool => force reward_shaping on env creation wrappers.
-        self.train.force_reward_shaping = None
+        self.train.use_reward_shaping = False
         
         # optional: override rollout episode count with sampled failed init-state count
         # if None, fallback to experiment.rollout.n

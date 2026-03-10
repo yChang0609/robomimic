@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from robomimic.config.config import Config
 
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.obs_utils as ObsUtils
@@ -67,7 +68,7 @@ def _log_action_normalization_diffs(
             )
 
 
-def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
+def rl_train(config:Config, device, resume=False, auto_remove_exp_dir=False):
     # === set up directories, logging, and seeds ===
     # first set seeds
     set_seed(config)
@@ -108,29 +109,11 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
     envs, env_meta_list, shape_meta_list = create_envs_from_dataset(config=config)
     env_name = env_meta_list[0]["env_name"]
 
-    force_reward_shaping = config.train.get("force_reward_shaping", None)
-    if force_reward_shaping is None:
-        print(
-            "Reward shaping override disabled (train.force_reward_shaping=None); "
-            "using env / dataset default reward mode."
-        )
-    else:
-        # keep existing square-task constraint for explicit reward-shaping overrides.
-        if "square" not in env_name.lower():
-            raise NotImplementedError(
-                "Reward-shaping override is only implemented for square task, got env '{}'".format(
-                    env_name
-                )
-            )
-
-        force_reward_shaping = bool(force_reward_shaping)
-        print(
-            "Forcing env reward_shaping={} from train.force_reward_shaping".format(
-                force_reward_shaping
-            )
-        )
+    use_reward_shaping = bool(config.train.use_reward_shaping)
+    if use_reward_shaping:
         for env in envs.values():
             base_env = env.env
+            # 
             while True:
                 if hasattr(base_env, "_init_kwargs"):
                     break
@@ -142,17 +125,16 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                 raise RuntimeError(
                     "Failed to locate base env wrapper with init kwargs for reward-shaping override"
                 )
-            base_env._init_kwargs["reward_shaping"] = force_reward_shaping
+            base_env._init_kwargs["reward_shaping"] = use_reward_shaping
             rs_env = getattr(base_env, "env", None)
             if (rs_env is None) or (not hasattr(rs_env, "reward_shaping")):
                 raise RuntimeError(
                     "Failed to set reward_shaping={} for env '{}'".format(
-                        force_reward_shaping, base_env
+                        use_reward_shaping, base_env
                     )
                 )
-            rs_env.reward_shaping = force_reward_shaping
+            rs_env.reward_shaping = use_reward_shaping
 
-    # TODO [priority: Low] if give mutli dataset need change this rule
     env_meta = env_meta_list[0]
     shape_meta = shape_meta_list[0]
     print("")
@@ -186,14 +168,6 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             f"config.train.rollout_init_state_sample_size must be > 0, got {train_rollout_num_episodes}"
         )
 
-    # maybe retreve statistics for normalizing observations
-    obs_normalization_stats = None
-    if config.train.repalybuffer_normalize_obs:
-        obs_normalization_stats = trainset.get_obs_normalization_stats()
-
-    # maybe retreve statistics for normalizing actions
-    action_normalization_stats = trainset.get_action_normalization_stats()
-
     # add info to optim_params
     train_num_steps = config.experiment.epoch_every_n_steps
     with config.values_unlocked():
@@ -215,6 +189,15 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
         if resume
         else None,
     )
+
+
+    # maybe retreve statistics for normalizing actions
+    action_normalization_stats = trainset.get_action_normalization_stats()
+    
+    # maybe retreve statistics for normalizing observations
+    obs_normalization_stats = None
+    if config.train.repalybuffer_normalize_obs:
+        obs_normalization_stats = trainset.get_obs_normalization_stats()
 
     # if the algo is a residual algo, we may want to load the base policy checkpoint and extract normalization stats from it
     if isinstance(model, ResidualAlgo):
@@ -238,25 +221,23 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
                             )
                     obs_normalization_stats = base_obs_normalization_stats
 
-            use_base_action_stats = config.train.get(
-                "use_base_action_normalization_stats", False
-            )
-            base_action_normalization_stats = base_policy_ckpt_dict.get(
-                "action_normalization_stats", None
-            )
-            if base_action_normalization_stats is None:
-                if use_base_action_stats:
-                    print(
-                        "\nWARNING: train.use_base_action_normalization_stats is True, but base checkpoint has no action_normalization_stats. "
-                        "Falling back to dataset action stats."
-                    )
-            else:
-                # convert stats from checkpoint to numpy arrays
-                for action_key in base_action_normalization_stats:
-                    for stat_key in base_action_normalization_stats[action_key]:
-                        base_action_normalization_stats[action_key][stat_key] = np.array(
-                            base_action_normalization_stats[action_key][stat_key]
+            use_base_action_stats = config.train.use_base_action_normalization_stats
+            if use_base_action_stats:
+                base_action_normalization_stats = base_policy_ckpt_dict.get(
+                    "action_normalization_stats", None
+                )
+                if base_action_normalization_stats is None:
+                        print(
+                            "\nWARNING: train.use_base_action_normalization_stats is True, but base checkpoint has no action_normalization_stats. "
+                            "Falling back to dataset action stats."
                         )
+                else:
+                    # convert stats from checkpoint to numpy arrays
+                    for action_key in base_action_normalization_stats:
+                        for stat_key in base_action_normalization_stats[action_key]:
+                            base_action_normalization_stats[action_key][stat_key] = np.array(
+                                base_action_normalization_stats[action_key][stat_key]
+                            )
 
                 # always compare base stats vs dataset stats when both are available,
                 # even if we keep dataset stats (use_base_action_stats=False).
@@ -390,7 +371,6 @@ def rl_train(config, device, resume=False, auto_remove_exp_dir=False):
             )
             print("Env: {}".format(env_name))
             print(json.dumps(env_rollout_log, sort_keys=True, indent=4))
-        
 
         eval_rollout_log = None
         if isinstance(model, ResidualAlgo):

@@ -21,7 +21,7 @@ def get_all_registered_configs():
     return deepcopy(REGISTERED_CONFIGS)
 
 
-def config_factory(algo_name, dic=None):
+def config_factory(algo_name, dic=None)->Config:
     """
     Creates an instance of a config from the algo name. Optionally pass
     a dictionary to instantiate the config from the dictionary.

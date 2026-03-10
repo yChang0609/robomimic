@@ -736,7 +736,7 @@ class ProgressiveResidualRolloutPolicy(ResidualRolloutPolicy):
         original_scale = self.policy.residual_scale
         original_low_noise_eval = None
         residual_actor = None
-        #
+        
         if hasattr(self.policy, "nets"):
             residual_actor = self.policy.nets["res_policy"]
 

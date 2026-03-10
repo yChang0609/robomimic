@@ -47,7 +47,7 @@
         "hdf5_cache_mode": "all",
         "hdf5_use_swmr": true,
         "hdf5_load_next_obs": false,
-        "repalybuffer_normalize_obs": false,
+        "hdf5_normalize_obs": false,
         "hdf5_filter_key": null,
         "hdf5_validation_filter_key": null,
         "seq_length": 16,
@@ -73,7 +73,8 @@
         "batch_size": 100,
         "num_epochs": 2000,
         "seed": 1,
-        "max_grad_norm": null        
+        "max_grad_norm": null,
+        "use_reward_shaping": false     
     },
     "algo": {
         "optim_params": {

@@ -62,7 +62,8 @@ class ResidualPolicy(ResidualAlgo):
             goal_shapes=self.goal_shapes,
             encoder_kwargs=encoder_kwargs,
             observation_horizon=observation_horizon,
-            use_tanh=True 
+            use_tanh=True,
+            low_noise_eval=False
         )
 
         self.learn_scale = bool(self.algo_config.residual.learn_scale)

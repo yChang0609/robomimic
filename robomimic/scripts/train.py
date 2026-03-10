@@ -36,7 +36,7 @@ def main(args):
             config.update(ext_cfg)
     else:
         config = config_factory(args.algo)
-
+    
     if args.dataset is not None:
         config.train.data = [{"path": args.dataset}]
 
