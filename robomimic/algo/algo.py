@@ -682,26 +682,29 @@ class ResidualRolloutPolicy(RolloutPolicy):
         self.last_base_action = TensorUtils.to_numpy(base_ac)
         self.last_residual_action = TensorUtils.to_numpy(res_ac)
 
-        # Handle un-normalization for the final action (same as RolloutPolicy)
-        if self.action_normalization_stats is not None:
-            action_keys = self.policy.global_config.train.action_keys
-            action_shapes = {k: self.action_normalization_stats[k]["offset"].shape[1:] for k in self.action_normalization_stats}
-            ac_dict = PyUtils.vector_to_action_dict(ac, action_shapes=action_shapes, action_keys=action_keys)
-            ac_dict = ObsUtils.unnormalize_dict(ac_dict, normalization_stats=self.action_normalization_stats)
-            action_config = self.policy.global_config.train.action_config
-            for key, value in ac_dict.items():
-                this_format = action_config[key].get("format", None)
-                if this_format == "rot_6d":
-                    rot_6d = torch.from_numpy(value).unsqueeze(0)
-                    conversion_format = action_config[key].get("convert_at_runtime", "rot_axis_angle")
-                    if conversion_format == "rot_axis_angle":
-                        rot = TorchUtils.rot_6d_to_axis_angle(rot_6d=rot_6d).squeeze().numpy()
-                    elif conversion_format == "rot_euler":
-                        rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ").squeeze().numpy()
-                    else:
-                        raise ValueError
-                    ac_dict[key] = rot
-            ac = PyUtils.action_dict_to_vector(ac_dict, action_keys=action_keys)
+        return ac if self.action_normalization_stats is None else self.unnormalization(ac)
+
+    def unnormalization(self, ac):
+        assert self.action_normalization_stats is not None, "self.action_normalization_stats is none"
+        action_keys = self.policy.global_config.train.action_keys
+        action_shapes = {k: self.action_normalization_stats[k]["offset"].shape[1:] for k in self.action_normalization_stats}
+        ac_dict = PyUtils.vector_to_action_dict(ac, action_shapes=action_shapes, action_keys=action_keys)
+        ac_dict = ObsUtils.unnormalize_dict(ac_dict, normalization_stats=self.action_normalization_stats)
+        action_config = self.policy.global_config.train.action_config
+        
+        for key, value in ac_dict.items():
+            this_format = action_config[key].get("format", None)
+            if this_format == "rot_6d":
+                rot_6d = torch.from_numpy(value).unsqueeze(0)
+                conversion_format = action_config[key].get("convert_at_runtime", "rot_axis_angle")
+                if conversion_format == "rot_axis_angle":
+                    rot = TorchUtils.rot_6d_to_axis_angle(rot_6d=rot_6d).squeeze().numpy()
+                elif conversion_format == "rot_euler":
+                    rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ").squeeze().numpy()
+                else:
+                    raise ValueError
+                ac_dict[key] = rot
+        ac = PyUtils.action_dict_to_vector(ac_dict, action_keys=action_keys)
         return ac
 
 def progressive_residual_action_prob(global_steps, warmup_steps=1500, full_residual_steps=10000):
