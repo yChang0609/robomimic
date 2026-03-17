@@ -74,7 +74,11 @@
         "num_epochs": 2000,
         "seed": 1,
         "max_grad_norm": null,
-        "use_reward_shaping": false     
+        "use_reward_shaping": false ,
+        "rollout_exploration":{
+            "sample_residual_actions":false
+        },
+        "use_base_action_normalization_stats":true
     },
     "algo": {
         "optim_params": {

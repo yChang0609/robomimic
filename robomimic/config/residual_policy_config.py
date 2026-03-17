@@ -48,7 +48,7 @@ class ResidualPolicyConfig(BaseConfig):
         # Training mode
         self.train.training_mode = "RL"
         self.train.replaybuffer_capacity = 2e5
-        self.train.repalybuffer_normalize_obs = False
+        self.train.hdf5_normalize_obs = False
 
         # optimization parameters
         for net_name in ("res_policy", "critic"):

@@ -81,12 +81,14 @@ run: validate print-config
 	docker run -it --gpus all --name $(CONTAINER_NAME) \
 		-v "$(CURDIR)":/workspace \
 		-v "$(DATASETS_DIR)":/datasets \
+		--ipc=host \
 		$(RUN_IMAGE)
 
 run-tail: validate print-config
 	docker run -it --gpus all --name $(CONTAINER_NAME) \
 		-v "$(CURDIR)":/workspace \
 		-v "$(DATASETS_DIR)":/datasets \
+		--ipc=host \
 		$(RUN_IMAGE) tail -f /dev/null
 
 exec: validate print-config

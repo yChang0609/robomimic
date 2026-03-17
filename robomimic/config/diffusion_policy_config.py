@@ -22,6 +22,7 @@ class DiffusionPolicyConfig(BaseConfig):
         # set compatible data loading parameters
         self.train.seq_length = 16 # should match self.algo.horizon.prediction_horizon
         self.train.frame_stack = 2 # should match self.algo.horizon.observation_horizon
+        self.train.training_mode = "IL"
     
     def algo_config(self):
         """

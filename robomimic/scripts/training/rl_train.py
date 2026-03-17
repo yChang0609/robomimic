@@ -196,20 +196,21 @@ def rl_train(config:Config, device, resume=False, auto_remove_exp_dir=False):
     
     # maybe retreve statistics for normalizing observations
     obs_normalization_stats = None
-    if config.train.repalybuffer_normalize_obs:
+    if config.train.hdf5_normalize_obs:
         obs_normalization_stats = trainset.get_obs_normalization_stats()
 
     # if the algo is a residual algo, we may want to load the base policy checkpoint and extract normalization stats from it
     if isinstance(model, ResidualAlgo):
-        base_policy_ckpt_path = getattr(
-            getattr(model.algo_config, "base_policy", None), "ckpt_path", None
-        )
+        # base_policy_ckpt_path = getattr(
+        #     getattr(model.algo_config, "base_policy", None), "ckpt_path", None
+        # )
+        base_policy_ckpt_path = model.algo_config.base_policy.ckpt_path
         if base_policy_ckpt_path is not None:
             base_policy_ckpt_dict = FileUtils.load_dict_from_checkpoint(
                 ckpt_path=base_policy_ckpt_path
             )
 
-            if config.train.repalybuffer_normalize_obs:
+            if not config.train.hdf5_normalize_obs:
                 base_obs_normalization_stats = base_policy_ckpt_dict.get(
                     "obs_normalization_stats", None
                 )
@@ -269,7 +270,7 @@ def rl_train(config:Config, device, resume=False, auto_remove_exp_dir=False):
             f"config.experiment.rollout.rate must be > 0, got {residual_eval_every_n_epochs}"
         )
     collect_sample_residual_actions = bool(
-        config.train.get("rollout_exploration", {}).get("sample_residual_actions", False)
+        config.train.rollout_exploration.sample_residual_actions
     )
 
     start_epoch = 1  # epoch numbers start at 1
