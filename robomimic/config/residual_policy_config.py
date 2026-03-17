@@ -41,7 +41,7 @@ class ResidualPolicyConfig(BaseConfig):
         # if True, train rollouts sample residual actions stochastically
         # (by disabling low_noise_eval on residual actor only during collection).
         # this does not affect residual evaluation rollouts.
-        self.train.rollout_exploration.sample_residual_actions = False
+        self.train.rollout_exploration.sample_residual_actions = True
     
     def algo_config(self):
         """
