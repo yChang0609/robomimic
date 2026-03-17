@@ -12,24 +12,30 @@ class ResidualPolicyConfig(BaseConfig):
         Setting up training parameters for Residual Policy.
 
         - don't need "next_obs" from hdf5 - so save on storage and compute by disabling it
-        - set compatible data loading parameters
+        - set compatible data loading parameters for diffusion-policy-based residual rollouts
         """
         super(ResidualPolicyConfig, self).train_config()
         
         # disable next_obs loading from hdf5
         self.train.hdf5_load_next_obs = False
 
+        # keep residual-policy runs in their own default output directory
+        self.train.output_dir = "../residual_policy_trained_models"
+
+        # match the diffusion-policy base checkpoint horizons used by residual policy
+        self.train.seq_length = 16
+        self.train.frame_stack = 2
+
         # optional reward shaping override during RL rollout collection.
         # bool => force reward_shaping on env creation wrappers.
         self.train.use_reward_shaping = False
         
-        # optional: override rollout episode count with sampled failed init-state count
-        # if None, fallback to experiment.rollout.n
+        # number of rollout init states to sample per training epoch
         self.train.rollout_init_state_sample_size = 1
 
-        # by default use action normalization stats from the current training dataset
-        # instead of overriding with base-policy checkpoint stats
-        self.train.use_base_action_normalization_stats = False
+        # by default use action normalization stats from the base-policy checkpoint
+        # so residual actions stay aligned with the base policy action space
+        self.train.use_base_action_normalization_stats = True
 
         # optional exploration toggle for rollout data collection.
         # if True, train rollouts sample residual actions stochastically

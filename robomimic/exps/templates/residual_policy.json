@@ -40,7 +40,7 @@
     "train": {
         "training_mode": "RL",
         "data": null,
-        "output_dir": "../diffusion_policy_trained_models",
+        "output_dir": "../residual_policy_trained_models",
         "normalize_weights_by_ds_size": false,
         "num_data_workers": 4,
         "replaybuffer_capacity": 2e5,
@@ -68,7 +68,7 @@
             }
         },
         "goal_mode": null,
-        "rollout_init_state_sample_size": null,
+        "rollout_init_state_sample_size": 1,
         "cuda": true,
         "batch_size": 100,
         "num_epochs": 2000,
@@ -126,6 +126,7 @@
             "mode": "additive",
             "scale_factor": 0.1,
             "learn_scale": false,
+            "regularization_weight": 0.001,
             "temporal_alignment": "sequence",
             "layer_dims": [256,512]
         },
